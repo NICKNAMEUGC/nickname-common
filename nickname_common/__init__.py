@@ -12,5 +12,6 @@ Módulos:
 __version__ = "0.1.0"
 
 from nickname_common.health import DeepHealthChecker
-from nickname_common.logging import setup_logger
+from nickname_common.logging import setup_logger, setup_logger_safe
+from nickname_common.log_redactor import redact, RedactingFilter
 from nickname_common.config import load_config

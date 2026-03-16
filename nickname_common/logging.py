@@ -61,3 +61,27 @@ def setup_logger(service_name: str, level: str = None) -> logging.Logger:
 
     _configured_loggers[key] = logger
     return logger
+
+
+def setup_logger_safe(service_name: str, level: str = None) -> logging.Logger:
+    """Igual que setup_logger pero con RedactingFilter incluido.
+
+    Redacta automáticamente API keys, tokens, emails y passwords de los logs.
+
+    Args:
+        service_name: Nombre del servicio
+        level: Nivel de log (default: LOG_LEVEL env var o INFO)
+
+    Returns:
+        Logger con redaction automática.
+    """
+    from nickname_common.log_redactor import RedactingFilter
+
+    logger = setup_logger(service_name, level)
+
+    # Añadir RedactingFilter si no lo tiene ya
+    has_redactor = any(isinstance(f, RedactingFilter) for f in logger.filters)
+    if not has_redactor:
+        logger.addFilter(RedactingFilter())
+
+    return logger
