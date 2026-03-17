@@ -14,7 +14,7 @@ Uso:
     logger.log(
         task_id="T-ABC123",
         agent="CTO",
-        system="nickname-super-agent",
+        system="nickname-email-marketing-agent",
         flow="Flujo 4",
         event="Deploy completado exitosamente",
         decision="DONE — verificado con curl",
