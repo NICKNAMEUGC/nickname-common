@@ -54,7 +54,7 @@ class HealthResponse:
     """Respuesta estándar de /api/health.
 
     Contrato:
-    - service: nombre del servicio (ej: "nickname-super-agent")
+    - service: nombre del servicio (ej: "nickname-email-marketing-agent")
     - version: versión del servicio
     - status: "online" | "degraded" | "offline"
     - timestamp: ISO 8601 UTC

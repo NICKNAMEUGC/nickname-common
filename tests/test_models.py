@@ -20,7 +20,7 @@ def test_health_check_to_dict():
 
 def test_health_response_to_dict():
     hr = HealthResponse(
-        service="super-agent",
+        service="email-marketing-agent",
         version="2.0.0",
         status=ServiceStatus.ONLINE,
         checks=[HealthCheck(name="db", status="ok", latency_ms=10)],

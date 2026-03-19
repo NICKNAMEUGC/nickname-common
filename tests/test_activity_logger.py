@@ -25,8 +25,8 @@ class TestLog:
         line = logger.log(
             task_id="T-ABC123",
             agent="CTO",
-            system="nickname-super-agent",
-            flow="Flujo 4",
+            system="nickname-email-marketing-agent",
+            flow="Workflow Newsletter",
             event="Deploy completado",
             decision="DONE",
             next_step="Ninguno",
@@ -42,8 +42,8 @@ class TestLog:
         # Verificar campos
         assert parts[1] == "T-ABC123"
         assert parts[2] == "CTO"
-        assert parts[3] == "nickname-super-agent"
-        assert parts[4] == "Flujo 4"
+        assert parts[3] == "nickname-email-marketing-agent"
+        assert parts[4] == "Workflow Newsletter"
         assert parts[5] == "Deploy completado"
         assert parts[6] == "DONE"
         assert parts[7] == "Ninguno"
