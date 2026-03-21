@@ -1,7 +1,9 @@
 """Tests para nickname_common.config"""
 
 import os
+
 import pytest
+
 from nickname_common.config import load_config
 
 

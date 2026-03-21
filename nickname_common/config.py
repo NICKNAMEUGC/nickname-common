@@ -14,7 +14,7 @@ Uso:
 """
 
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 
 def load_config(required: List[str] = None,

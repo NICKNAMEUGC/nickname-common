@@ -2,9 +2,8 @@
 
 import logging
 
-from nickname_common.log_redactor import redact, RedactingFilter
+from nickname_common.log_redactor import RedactingFilter, redact
 from nickname_common.logging import setup_logger_safe
-
 
 # --- redact() function ---
 

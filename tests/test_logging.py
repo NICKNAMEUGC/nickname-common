@@ -1,6 +1,7 @@
 """Tests para nickname_common.logging"""
 
 import logging
+
 from nickname_common.logging import setup_logger
 
 

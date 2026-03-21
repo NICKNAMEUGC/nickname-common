@@ -14,7 +14,6 @@ import logging
 import os
 import sys
 
-
 _configured_loggers: dict = {}
 
 

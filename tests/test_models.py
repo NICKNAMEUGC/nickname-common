@@ -1,12 +1,19 @@
 """Tests para nickname_common.models — contratos compartidos."""
 
 from nickname_common.models import (
-    HealthCheck, HealthResponse, ServiceStatus,
-    Task, TaskStatus, TaskPriority, TasksResponse,
-    ActivityEntry, ActivityLevel,
-    AutomationJob, AutomationSeverity, AutomationsResponse,
+    ActivityEntry,
+    ActivityLevel,
+    AutomationJob,
+    AutomationSeverity,
+    AutomationsResponse,
+    HealthCheck,
+    HealthResponse,
+    ServiceStatus,
+    Task,
+    TaskPriority,
+    TasksResponse,
+    TaskStatus,
 )
-
 
 # --- HealthCheck / HealthResponse ---
 

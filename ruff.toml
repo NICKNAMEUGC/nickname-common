@@ -1,0 +1,18 @@
+line-length = 120
+target-version = "py312"
+
+[lint]
+select = ["E", "W", "F", "I"]
+ignore = [
+    "E402",  # module-import-not-at-top — common pattern in Flask apps
+    "E501",  # line-too-long — handled by formatter
+    "E711",  # comparison-to-none — style preference
+    "E712",  # true-false-comparison — style preference
+    "W291",  # trailing-whitespace
+    "W293",  # whitespace-before-comment
+]
+
+[lint.per-file-ignores]
+"scripts/*" = ["F401", "E401"]
+"migrations/*" = ["F401", "E401"]
+"tests/*" = ["F401"]

@@ -8,11 +8,10 @@ Uso:
     result = checker.run()  # dict listo para jsonify
 """
 
-import time
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
-
 
 DEFAULT_TIMEOUT_SEC = 5
 

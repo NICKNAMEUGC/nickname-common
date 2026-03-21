@@ -20,7 +20,6 @@ O usar el helper integrado:
 import logging
 import re
 
-
 # Patrones de secretos a redactar (ordenados de más específico a más genérico)
 _REDACT_PATTERNS: list[tuple[re.Pattern, str]] = [
     # Anthropic API keys

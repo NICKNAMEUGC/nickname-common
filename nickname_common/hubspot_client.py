@@ -14,9 +14,9 @@ Portal: 147084424 (EU region)
 import json
 import os
 import time
-import urllib.request
 import urllib.error
-from typing import Any, Dict, List, Optional
+import urllib.request
+from typing import Dict, List
 
 from nickname_common.logging import setup_logger
 
