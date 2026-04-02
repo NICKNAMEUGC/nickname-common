@@ -151,6 +151,27 @@ class OdooService:
                 )
             self._close_circuit()
             return result
+        except xmlrpc.client.Fault as e:
+            # Odoo está activo pero rechazó la llamada — NO abrir circuit breaker.
+            # Si el faultCode indica error de autenticación, invalidar UID cacheado.
+            auth_fault_codes = {1, 3}
+            is_auth_fault = (
+                e.faultCode in auth_fault_codes
+                or "access denied" in str(e.faultString).lower()
+            )
+            if is_auth_fault:
+                log.warning(
+                    f"[ODOO] Fault de autenticación (faultCode={e.faultCode}) — "
+                    f"invalidando UID cacheado para forzar re-auth: {e.faultString}"
+                )
+                with self._lock:
+                    self._uid = None
+            else:
+                log.error(
+                    f"[ODOO] xmlrpc.Fault en {model}.{method} "
+                    f"(faultCode={e.faultCode}): {e.faultString}"
+                )
+            raise
         except (ConnectionError, TimeoutError, OSError, xmlrpc.client.ProtocolError) as e:
             self._open_circuit(e)
             raise
@@ -174,6 +195,25 @@ class OdooService:
                 )
             self._close_circuit()
             return result
+        except xmlrpc.client.Fault as e:
+            auth_fault_codes = {1, 3}
+            is_auth_fault = (
+                e.faultCode in auth_fault_codes
+                or "access denied" in str(e.faultString).lower()
+            )
+            if is_auth_fault:
+                log.warning(
+                    f"[ODOO] Fault de autenticación (faultCode={e.faultCode}) — "
+                    f"invalidando UID cacheado para forzar re-auth: {e.faultString}"
+                )
+                with self._lock:
+                    self._uid = None
+            else:
+                log.error(
+                    f"[ODOO] xmlrpc.Fault en execute_with_context "
+                    f"(faultCode={e.faultCode}): {e.faultString}"
+                )
+            raise
         except (ConnectionError, TimeoutError, OSError, xmlrpc.client.ProtocolError) as e:
             self._open_circuit(e)
             raise
