@@ -30,6 +30,10 @@ Regla L-014 incorporada: thinking_budget=0 por defecto en los tiers flash —
 en Gemini 2.5 el razonamiento consume max_output_tokens ANTES del output y
 trunca JSON/respuestas con caps ajustados. Pasar thinking_budget=None para
 permitir thinking dinámico (tiers de calidad, ej. redacción con gemini_pro).
+
+GOTCHA (verificado 2026-06-12): gemini-2.5-pro RECHAZA thinking_budget=0 con
+400 "Budget 0 is invalid. This model only works in thinking mode". Para el
+tier gemini_pro usar SIEMPRE thinking_budget=None.
 """
 
 import os
