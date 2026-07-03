@@ -26,6 +26,16 @@ XMLRPC_TIMEOUT = int(os.getenv("ODOO_XMLRPC_TIMEOUT", "20"))
 CIRCUIT_BREAKER_TIMEOUT = int(os.getenv("ODOO_CIRCUIT_BREAKER_TIMEOUT", "60"))
 
 
+class OdooAuthenticationError(Exception):
+    """Credenciales invalidas/revocadas (uid falsy tras authenticate()).
+
+    Deliberadamente NO hereda de ConnectionError/OSError: es un problema de
+    configuracion que requiere intervencion humana inmediata, no un fallo de
+    red transitorio, y por tanto no debe abrir el circuit breaker (que asume
+    que reintentar en unos segundos tiene sentido).
+    """
+
+
 # --- Transports con timeout ---
 
 class _TimeoutSafeTransport(xmlrpc.client.SafeTransport):
@@ -102,7 +112,7 @@ class OdooService:
                         self.db, self.username, self.api_key, {}
                     )
                     if not self._uid:
-                        raise ConnectionError(
+                        raise OdooAuthenticationError(
                             f"No se pudo autenticar con Odoo como {self.username}"
                         )
         return self._uid
@@ -172,6 +182,12 @@ class OdooService:
                     f"(faultCode={e.faultCode}): {e.faultString}"
                 )
             raise
+        except OdooAuthenticationError as e:
+            # Credenciales invalidas/revocadas — NO es un fallo de red: no
+            # abrir el circuit breaker (evita ocultar el problema real tras
+            # "Odoo inaccesible" durante horas de reintentos automaticos).
+            log.error(f"[ODOO] AUTH FAILED en {model}.{method}: {e}")
+            raise
         except (ConnectionError, TimeoutError, OSError, xmlrpc.client.ProtocolError) as e:
             self._open_circuit(e)
             raise
@@ -213,6 +229,9 @@ class OdooService:
                     f"[ODOO] xmlrpc.Fault en execute_with_context "
                     f"(faultCode={e.faultCode}): {e.faultString}"
                 )
+            raise
+        except OdooAuthenticationError as e:
+            log.error(f"[ODOO] AUTH FAILED en execute_with_context ({model}.{method}): {e}")
             raise
         except (ConnectionError, TimeoutError, OSError, xmlrpc.client.ProtocolError) as e:
             self._open_circuit(e)
