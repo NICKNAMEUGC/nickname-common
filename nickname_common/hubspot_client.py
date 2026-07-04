@@ -79,6 +79,8 @@ class HubSpotService:
 
     # --- Paginación ---
 
+    SEARCH_API_RESULT_CAP = 10000
+
     def search_all(self, object_type: str, body: dict) -> List[Dict]:
         """Busca todos los registros de un tipo con paginación automática.
 
@@ -89,6 +91,15 @@ class HubSpotService:
 
         Returns:
             Lista completa de resultados.
+
+        Nota:
+            La Search API de HubSpot deja de paginar (no manda 'paging.next.after')
+            al alcanzar 10.000 resultados totales para una búsqueda, sin importar
+            cuántos registros reales queden. Si se toca ese cap, se loguea un
+            warning explícito para que el caller pueda partir la ventana
+            (p.ej. por fecha) y volver a consultar en chunks más pequeños —
+            de lo contrario los registros por encima del límite se pierden
+            en silencio en syncs incrementales.
         """
         all_results = []
         after = None
@@ -105,6 +116,15 @@ class HubSpotService:
             after = paging.get("next", {}).get("after")
             if not after:
                 break
+
+        if len(all_results) >= self.SEARCH_API_RESULT_CAP:
+            log.warning(
+                f"search_all({object_type}) devolvió {len(all_results)} resultados: "
+                f"alcanzado el límite de {self.SEARCH_API_RESULT_CAP} de la HubSpot "
+                "Search API. Es posible que haya registros adicionales sin recuperar "
+                "— partir la ventana (filtro de fecha) y re-consultar en chunks más "
+                "pequeños."
+            )
 
         return all_results
 
