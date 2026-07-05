@@ -1,72 +1,46 @@
 <!-- DOC-TYPE: AUTORITATIVO -->
 # nickname-common
 
-Libreria Python compartida por todos los agentes del ecosistema Nickname. Zero dependencias externas (solo stdlib). Logging, config, health checks, clientes Odoo/HubSpot, activity logging, modelos de datos.
+Librería Python compartida por los agentes del ecosistema (~14 repos la consumen).
+Solo stdlib, cero dependencias externas. Aporta: logging estándar, validación de
+config, health checks, clientes Odoo/HubSpot, registro central de modelos LLM,
+eval harness, activity logging y modelos de datos.
 
-## Reglas
-- Python 3.12+, sin dependencias externas (solo stdlib)
-- NO tiene .env propio — hereda del repo que lo importa
-- Cambios aqui afectan a TODOS los agentes — testear antes de push
-- ODOO_COMPANY_ID=2 siempre (NICKNAME MANAGEMENT SL.)
-- Thread-safe en todos los modulos (RLock, file locking)
+GitHub: https://github.com/NICKNAMEUGC/nickname-common (privado) · v0.1.0 · Python >=3.12 · CI: `.github/workflows/verify.yml` (pytest en PR)
 
-## Instalacion
+## Reglas del repo
+- Cero dependencias externas (`setup.py` con `install_requires=[]`). Cada agente trae las suyas (Flask, etc.).
+- NO tiene `.env` propio — hereda del agente que lo importa (`.env.example` documenta las vars).
+- Cambios aquí afectan a TODOS los consumidores: tests + `verify.sh` en verde antes de push, y bump del pin en los agentes que deban recibir el cambio (sin bump, Railway no lo ve).
+- Contexto Odoo del tenant (companies, stages, gotchas): `.ag/odoo_reference.md`. Servicios y reglas técnicas: `.ag/api/registry.yaml`.
+
+## Instalación
 ```bash
 # Desarrollo local (editable)
 pip install -e ~/Desktop/Apps/nickname-common
 
-# En requirements.txt de agentes (SHA pinned)
-nickname-common @ git+https://github.com/NICKNAMEUGC/nickname-common.git@fe17ba54fd412240e325b3d2d60fb738b3044ca1
+# En requirements.txt de agentes: pin por SHA (obtenerlo del repo, no de este doc)
+git -C ~/Desktop/Apps/nickname-common rev-parse HEAD
+# nickname-common @ git+https://github.com/NICKNAMEUGC/nickname-common.git@<SHA>
 ```
 
-## Estructura
-```
-nickname-common/
-├── nickname_common/
-│   ├── __init__.py               # Exports: setup_logger, load_config, DeepHealthChecker, etc.
-│   ├── logging.py                # setup_logger() + setup_logger_safe() (con redaccion)
-│   ├── config.py                 # load_config(required=[], optional={})
-│   ├── health.py                 # DeepHealthChecker (parallel threading, timeout)
-│   ├── log_redactor.py           # RedactingFilter + redact() — enmascara API keys/tokens
-│   ├── odoo_client.py            # OdooService — XML-RPC con circuit breaker + lazy init
-│   ├── hubspot_client.py         # HubSpotService — REST con rate limiting + auto-retry
-│   ├── activity_logger.py        # ActivityLogger — escribe decisions_log.md (file locking)
-│   └── models/
-│       ├── task.py               # Task, TaskStatus, TaskPriority, TasksResponse
-│       ├── health.py             # HealthCheck, HealthResponse, ServiceStatus
-│       ├── automation.py         # AutomationJob, AutomationSeverity, AutomationsResponse
-│       └── activity.py           # ActivityEntry, ActivityLevel
-│
-├── tests/
-│   ├── test_logging.py
-│   ├── test_config.py
-│   ├── test_health.py
-│   ├── test_log_redactor.py
-│   ├── test_activity_logger.py
-│   └── test_models.py
-│
-├── scripts/
-│   └── verify.sh                 # Pre-push: version check, install, tests, secret scan
-├── setup.py                      # Package config (nickname-common 0.1.0)
-└── ruff.toml                     # Linter config
-```
-
-## API publica (imports)
-
+## API pública
 ```python
 from nickname_common import (
-    setup_logger,             # Logger estandarizado [SERVICE] [LEVEL] msg
-    setup_logger_safe,        # Igual pero con RedactingFilter incluido
-    load_config,              # Validacion env vars (required + optional con defaults)
-    DeepHealthChecker,        # Health checks paralelos con threading
-    RedactingFilter,          # logging.Filter que enmascara secrets
-    redact,                   # Funcion standalone para redactar strings
+    setup_logger,        # [SERVICE] [LEVEL] msg — respeta LOG_LEVEL, cachea por nombre
+    setup_logger_safe,   # igual + RedactingFilter (redacción NO es default)
+    load_config,         # load_config(required=[...], optional={...}) — ValueError si falta required
+    DeepHealthChecker,   # checks paralelos con timeout → status online/degraded/offline
+    RedactingFilter, redact,  # enmascara keys (Anthropic/OpenAI/Google/HubSpot), Bearer/Basic, hex≥40, passwords, emails
 )
-
 from nickname_common.odoo_client import OdooService
+#   XML-RPC + circuit breaker (60s tras fallo) + lazy auth + RLock. company_id default=2 (hardcoded).
+#   search / search_read / read / create / write / unlink / execute_with_context / test_connection
 from nickname_common.hubspot_client import HubSpotService
-from nickname_common.activity_logger import ActivityLogger
-
+#   REST + retry en 429 (10s x intento, max 3). search_all (paginado) / search_modified / get_associations
+from nickname_common.llm import get_model, all_models, provider_of, gemini_config_sdk, gemini_config_rest
+from nickname_common.evals import run_golden, load_golden   # EvalReport con accuracy
+from nickname_common.activity_logger import ActivityLogger  # escribe .ag/decisions_log.md (fcntl + Lock)
 from nickname_common.models import (
     Task, TaskStatus, TaskPriority, TasksResponse,
     HealthCheck, HealthResponse, ServiceStatus,
@@ -75,105 +49,46 @@ from nickname_common.models import (
 )
 ```
 
-## Modulos detallados
+## Registro LLM (`llm.py`) — fuente única de nombres de modelo
+- Tiers: `gemini_flash`, `gemini_pro`, `imagen`, `claude_sonnet` → `get_model(tier)`.
+- Override de emergencia sin deploy: env `NK_MODEL_<TIER>` (p.ej. `NK_MODEL_GEMINI_FLASH`) en Railway.
+- `gemini_config_sdk()` / `gemini_config_rest()` ponen `thinking_budget=0` por defecto (protege `max_output_tokens`).
+- ⚠️ `gemini-2.5-pro` RECHAZA `thinking_budget=0` (400) → para el tier `gemini_pro` pasar `thinking_budget=None`.
+- El canary de NightWatch (task 15) vigila a diario que los modelos del registro sigan vivos.
+- Origen del patrón (retirada silenciosa de gemini-2.0-flash): L-014 en `.ag/learnings.md`.
 
-### logging.py
-```python
-logger = setup_logger("email-marketing")        # [EMAIL-MARKETING] [INFO] msg
-logger = setup_logger_safe("email-marketing")    # Igual + RedactingFilter
-```
-- Respeta LOG_LEVEL env var (default: INFO)
-- Caching: reutiliza loggers por nombre, no duplica handlers
-
-### config.py
-```python
-config = load_config(
-    required=["ODOO_URL", "HUBSPOT_ACCESS_TOKEN"],
-    optional={"RETRY_ATTEMPTS": "3", "LOG_LEVEL": "INFO"}
-)
-# Lanza ValueError si falta alguna required
-```
-
-### health.py — DeepHealthChecker
-```python
-checker = DeepHealthChecker("my-service", version="1.0.0")
-checker.add_check("odoo", lambda: odoo.test_connection(), timeout_sec=10)
-checker.add_check("hubspot", lambda: hs.test_connection())
-result = checker.run()  # Dict con status: online/degraded/offline
-```
-
-### odoo_client.py — OdooService
-```python
-odoo = OdooService()  # Lee ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_API_KEY
-odoo.search("res.partner", [("is_company", "=", True)])
-odoo.search_read("crm.lead", [("stage_id.name", "=", "Won")], fields=["name", "expected_revenue"])
-odoo.create("res.partner", {"name": "Test", "company_id": 2})
-odoo.write("res.partner", [123], {"phone": "+34..."})
-odoo.test_connection()  # Dict con status, uid, error
-```
-- **Circuit breaker**: Si Odoo falla, rechaza calls por 60s (configurable)
-- **Lazy init**: Autenticacion al primer uso
-- **Thread-safe**: RLock serializa llamadas
-
-### hubspot_client.py — HubSpotService
-```python
-hs = HubSpotService()  # Lee HUBSPOT_ACCESS_TOKEN
-hs.search_all("contacts", {"filterGroups": [...]})  # Paginacion automatica
-hs.search_modified("deals", since_ms, properties=["dealname", "amount"])
-hs.get_associations("deals", "companies", [deal_id])
-hs.test_connection()
-```
-- **Rate limiting**: Auto-retry en 429 con exponential backoff (10s x attempt, max 3)
-
-### activity_logger.py — ActivityLogger
-```python
-logger = ActivityLogger()  # Auto-detecta .ag/decisions_log.md
-logger.log(task_id="T-123", agent="CTO", system="odoo-agent",
-           flow="Flujo 2", event="Sync completado", decision="OK")
-logger.log_quick(agent="orchestrator", message="Health check passed")
-```
-- File locking (fcntl) + threading.Lock para concurrencia segura
-
-### log_redactor.py
-```python
-from nickname_common import redact
-safe_text = redact("key is sk-ant-api03-xyz...")  # "key is ***ANTHROPIC_KEY***"
-```
-Patrones: Anthropic, OpenAI, Google, HubSpot keys, Bearer tokens, passwords, emails.
+## Evals (`evals.py`)
+- Golden sets JSONL (`{"id", "input", "expected"}`) + `run_golden(path, fn)` → accuracy y fallos.
+- Los tests con marker `eval` llaman al LLM REAL → NO corren en CI: `pytest -m "not eval"` (CI) / `pytest -m eval -v` (con keys).
+- Gate: cambio de modelo o prompt en un servicio con golden set debe pasar su eval antes de deploy.
 
 ## Env vars (del consumidor)
-
-| Variable | Modulo | Default |
+| Variable | Módulo | Default |
 |---|---|---|
-| `LOG_LEVEL` | logging.py | INFO |
-| `ODOO_URL` | odoo_client | — |
-| `ODOO_DB` | odoo_client | — |
-| `ODOO_USERNAME` | odoo_client | — |
-| `ODOO_API_KEY` | odoo_client | — |
+| `LOG_LEVEL` | logging | INFO |
+| `ODOO_URL` / `ODOO_DB` / `ODOO_USERNAME` / `ODOO_API_KEY` | odoo_client | — |
 | `ODOO_COMPANY_ID` | odoo_client | 2 |
-| `ODOO_XMLRPC_TIMEOUT` | odoo_client | 20s |
-| `ODOO_CIRCUIT_BREAKER_TIMEOUT` | odoo_client | 60s |
+| `ODOO_XMLRPC_TIMEOUT` / `ODOO_CIRCUIT_BREAKER_TIMEOUT` | odoo_client | 20s / 60s |
 | `HUBSPOT_ACCESS_TOKEN` | hubspot_client | — |
-| `AG_DECISIONS_LOG` | activity_logger | Auto-detect |
+| `NK_MODEL_<TIER>` | llm | defaults del registro |
+| `AG_DECISIONS_LOG` | activity_logger | auto-detect |
 
 ## Testing
 ```bash
 cd ~/Desktop/Apps/nickname-common
-python3 -m pytest tests/ -q --tb=short
-
-# Verificacion completa (version, install, tests, secrets)
-bash scripts/verify.sh
+python3 -m pytest tests/ -q --tb=short   # unit (CI corre esto en PR)
+bash scripts/verify.sh                    # versión + install + tests + scan de secretos
 ```
 
-## Usado por (8+ agentes)
-email-marketing-agent, odoo-agent, paid-media-agent, emilia-gmail, management-gmail, linkedin-agent, analytics-dashboard, clickup-agent, dashboard.
+## Consumidores
+No mantener lista aquí — verla en vivo:
+```bash
+grep -rn "nickname-common" ~/Desktop/Apps/*/requirements*.txt
+```
+Estado real de pins: la mayoría pinnea SHA; `fiscal-agent` y `linkedin-agent` (locales, sin Railway) usan `@main`.
 
-## Gotchas
-1. **Zero deps externas** — solo stdlib. Los agentes traen sus propias deps (Flask, etc.)
-2. **company_id=2 OBLIGATORIO** — Hardcoded default en OdooService
-3. **Circuit breaker Odoo** — Rechaza calls 60s tras fallo. No reintentar inmediatamente.
-4. **Redaccion NO es default** — Usar `setup_logger_safe()` explicitamente
-5. **SHA pinned** — Los agentes referencian un commit especifico. Actualizar SHA tras cambios.
-
-## GitHub
-https://github.com/NICKNAMEUGC/nickname-common (private)
+## Gotchas (solo de este repo)
+1. **Circuit breaker Odoo**: tras un fallo rechaza llamadas durante 60s — no reintentar en caliente.
+2. **Redacción NO es default**: logs con payloads sensibles → `setup_logger_safe()` explícito.
+3. **`company_id=2` es default hardcodeado** en `OdooService` — override por argumento o `ODOO_COMPANY_ID` (multi-company: ver `.ag/odoo_reference.md`).
+4. **El pin manda**: mergear en main NO actualiza a nadie — sin bump de SHA en el agente, el fix no llega a producción.
