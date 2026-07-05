@@ -1,0 +1,6 @@
+# Deps de desarrollo/CI. Pineadas para que local (.venv) y el workflow
+# (verify.yml) usen exactamente la misma version — pytest 9.1 cambio el
+# comportamiento de caplog (captura loggers propagate=False) y una version
+# sin pinear dio CI verde / local rojo (patron canonico: nickname-odoo-agent
+# commit 27cc8b1).
+pytest==9.1.1

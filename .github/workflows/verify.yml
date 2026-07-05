@@ -14,6 +14,6 @@ jobs:
       - name: Install package
         run: |
           pip install -e .
-          pip install pytest
+          pip install -r requirements-dev.txt
       - name: Run tests
         run: python -m pytest tests/ -q --tb=short
