@@ -38,13 +38,25 @@ tier gemini_pro usar SIEMPRE thinking_budget=None.
 
 import os
 
-# Defaults vigentes (verificados 2026-06-12).
-# Histórico de retiradas: gemini-2.0-flash (Google, ~05/2026, L-014).
+# Defaults vigentes (verificados 2026-07-06).
+# Histórico de retiradas: gemini-2.0-flash (Google, ~05/2026, L-014);
+# imagen-4.0-generate-001 (Google, ~07/2026, L-037 — canary 15_model_canary,
+# 404 en :predictImages, endpoint retirado por completo).
 _DEFAULTS = {
     # Gemini
     "gemini_flash": "gemini-2.5-flash",       # clasificación, triaje, alto volumen
     "gemini_pro": "gemini-2.5-pro",           # redacción de calidad (drafts voice-cloned)
-    "imagen": "imagen-4.0-generate-001",      # NanoBanana (n8n LinkedIn/newsletter)
+    # NanoBanana (n8n LinkedIn/newsletter). ⚠️ Cambio de familia de API respecto al
+    # anterior imagen-4.0-generate-001: este modelo se llama via :generateContent
+    # (mismo endpoint que los tiers de texto) con
+    # generationConfig.responseModalities=["TEXT","IMAGE"], NO via :predictImages
+    # (API Vertex-Imagen clásica). Cualquier caller que siga usando el shape
+    # instances/parameters de :predictImages debe migrar al shape contents/parts.
+    # NINGÚN caller Python de este repo invoca hoy get_model("imagen") para generar
+    # de verdad — la generación real vive en el workflow n8n "V3 LinkedIn Daily" /
+    # Newsletter (HTTP node propio, fuera de este registro). Actualizar ese nodo es
+    # un paso APARTE, pendiente (ver T-REVIEW-NIGHTWATCH-4c02d0c0).
+    "imagen": "gemini-3.1-flash-image",
     # Anthropic
     "claude_sonnet": "claude-sonnet-4-20250514",  # judge IG agent, n8n Content Factory
 }
