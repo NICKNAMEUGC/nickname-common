@@ -6,7 +6,7 @@ Solo stdlib, cero dependencias externas. Aporta: logging estándar, validación 
 config, health checks, clientes Odoo/HubSpot, registro central de modelos LLM,
 eval harness, activity logging y modelos de datos.
 
-GitHub: https://github.com/NICKNAMEUGC/nickname-common (privado) · v0.1.0 · Python >=3.12 · CI: `.github/workflows/verify.yml` (pytest en PR)
+GitHub: https://github.com/NICKNAMEUGC/nickname-common · v0.1.0 · Python >=3.12 · CI: `.github/workflows/verify.yml` (pytest en PR)
 
 ## Reglas del repo
 - Cero dependencias externas (`setup.py` con `install_requires=[]`). Cada agente trae las suyas (Flask, etc.).
@@ -34,7 +34,7 @@ from nickname_common import (
     RedactingFilter, redact,  # enmascara keys (Anthropic/OpenAI/Google/HubSpot), Bearer/Basic, hex≥40, passwords, emails
 )
 from nickname_common.odoo_client import OdooService
-#   XML-RPC + circuit breaker (60s tras fallo) + lazy auth + RLock. company_id default=2 (hardcoded).
+#   XML-RPC + circuit breaker (60s tras fallo de red/timeout — NO de auth) + lazy auth + RLock. company_id default=2 (hardcoded).
 #   search / search_read / read / create / write / unlink / execute_with_context / test_connection
 from nickname_common.hubspot_client import HubSpotService
 #   REST + retry en 429 (10s x intento, max 3). search_all (paginado) / search_modified / get_associations
@@ -59,7 +59,8 @@ from nickname_common.models import (
 
 ## Evals (`evals.py`)
 - Golden sets JSONL (`{"id", "input", "expected"}`) + `run_golden(path, fn)` → accuracy y fallos.
-- Los tests con marker `eval` llaman al LLM REAL → NO corren en CI: `pytest -m "not eval"` (CI) / `pytest -m eval -v` (con keys).
+- Convención para CONSUMIDORES con golden set propio: tests marcados `@pytest.mark.eval` llaman al LLM REAL → excluir en su CI con `pytest -m "not eval"`, correr aparte con `pytest -m eval -v` (con keys). Ejemplo real: `nickname-management-gmail` (`management_inbox_classification` en `.ag/contracts/governance.yaml`, `eval_gate: pytest -m eval ≥0.85`).
+- Este repo NO tiene hoy tests `eval` propios ni marker registrado; su CI/`verify.sh` corren `pytest tests/` sin filtro `-m` (ver Testing). Si se añade un test `eval` aquí, hay que sumar `-m "not eval"` a `verify.yml`/`verify.sh` o correrá en CI contra un LLM real sin keys.
 - Gate: cambio de modelo o prompt en un servicio con golden set debe pasar su eval antes de deploy.
 
 ## Env vars (del consumidor)
@@ -76,19 +77,20 @@ from nickname_common.models import (
 ## Testing
 ```bash
 cd ~/Desktop/Apps/nickname-common
-python3 -m pytest tests/ -q --tb=short   # unit (CI corre esto en PR)
+python3 -m pytest tests/ -q --tb=short   # unit (CI corre esto en PR, SIN filtro -m)
 bash scripts/verify.sh                    # versión + install + tests + scan de secretos
 ```
 
 ## Consumidores
 No mantener lista aquí — verla en vivo:
 ```bash
-grep -rn "nickname-common" ~/Desktop/Apps/*/requirements*.txt
+grep -rn "nickname-common" ~/Desktop/Apps/*/requirements*.txt                 # quién consume
+grep -rn "nickname-common" ~/Desktop/Apps/*/requirements*.txt | grep "@main"  # quién NO pinea SHA
 ```
-Estado real de pins: la mayoría pinnea SHA; `fiscal-agent` y `linkedin-agent` (locales, sin Railway) usan `@main`.
+Patrón observado: los agentes locales sin Railway (Fiscal, LinkedIn) son los que más usan `@main` en vez de pin — menos presión de coordinar un bump. Lo que importa operativamente es el gotcha 4, no memorizar el listado exacto.
 
 ## Gotchas (solo de este repo)
-1. **Circuit breaker Odoo**: tras un fallo rechaza llamadas durante 60s — no reintentar en caliente.
+1. **Circuit breaker Odoo**: tras un fallo de conexión/timeout (no de autenticación) rechaza llamadas durante 60s — no reintentar en caliente. Un fallo de auth (`OdooAuthenticationError`, ej. API key rotada) NO abre el circuito a propósito: falla rápido y explícito en vez de parecer una caída de red (ver `tests/test_odoo_client.py`).
 2. **Redacción NO es default**: logs con payloads sensibles → `setup_logger_safe()` explícito.
 3. **`company_id=2` es default hardcodeado** en `OdooService` — override por argumento o `ODOO_COMPANY_ID` (multi-company: ver `.ag/odoo_reference.md`).
 4. **El pin manda**: mergear en main NO actualiza a nadie — sin bump de SHA en el agente, el fix no llega a producción.
