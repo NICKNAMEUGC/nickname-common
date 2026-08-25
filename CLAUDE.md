@@ -38,7 +38,7 @@ from nickname_common.odoo_client import OdooService
 #   search / search_read / read / create / write / unlink / execute_with_context / test_connection
 from nickname_common.hubspot_client import HubSpotService
 #   REST + retry en 429 (10s x intento, max 3). search_all (paginado) / search_modified / get_associations
-from nickname_common.llm import get_model, all_models, provider_of, gemini_config_sdk, gemini_config_rest
+from nickname_common.llm import get_model, all_models, provider_of, capabilities, complete, gemini_config_sdk, gemini_config_rest
 from nickname_common.evals import run_golden, load_golden   # EvalReport con accuracy
 from nickname_common.activity_logger import ActivityLogger  # escribe .ag/decisions_log.md (fcntl + Lock)
 from nickname_common.models import (
@@ -50,11 +50,13 @@ from nickname_common.models import (
 ```
 
 ## Registro LLM (`llm.py`) — fuente única de nombres de modelo
-- Tiers: `gemini_flash`, `gemini_pro`, `imagen`, `claude_sonnet` → `get_model(tier)`.
+- Tiers: `gemini_flash`, `gemini_pro`, `imagen`, `claude_sonnet`, `grok_fast`, `grok_quality` → `get_model(tier)`.
 - Override de emergencia sin deploy: env `NK_MODEL_<TIER>` (p.ej. `NK_MODEL_GEMINI_FLASH`) en Railway.
+- Guard L-014: un override no puede cruzar de familia (`NK_MODEL_GEMINI_FLASH=grok-4` → `CrossProviderOverrideError`).
 - `gemini_config_sdk()` / `gemini_config_rest()` ponen `thinking_budget=0` por defecto (protege `max_output_tokens`).
 - ⚠️ `gemini-2.5-pro` RECHAZA `thinking_budget=0` (400) → para el tier `gemini_pro` pasar `thinking_budget=None`.
-- El canary de NightWatch (task 15) vigila a diario que los modelos del registro sigan vivos.
+- xAI Fase 1 (dry): `complete(tier, messages, ...)` solo para `grok_*`. Sin `XAI_API_KEY` o sin `NK_XAI_LIVE=1` falla cerrado y no llama a la red. Tests inyectan `http_post`. Grok no cubre embeddings ni imagen (`capabilities()`).
+- El canary de NightWatch (task 15) vigila a diario que los modelos del registro sigan vivos. xAI queda `unmonitored` hasta provisionar key (Fase 2).
 - Origen del patrón (retirada silenciosa de gemini-2.0-flash): L-014 en `.ag/learnings.md`.
 
 ## Evals (`evals.py`)
@@ -72,6 +74,8 @@ from nickname_common.models import (
 | `ODOO_XMLRPC_TIMEOUT` / `ODOO_CIRCUIT_BREAKER_TIMEOUT` | odoo_client | 20s / 60s |
 | `HUBSPOT_ACCESS_TOKEN` | hubspot_client | — |
 | `NK_MODEL_<TIER>` | llm | defaults del registro |
+| `XAI_API_KEY` | llm.complete | no provisionada (Fase 1) |
+| `NK_XAI_LIVE` | llm.complete | off; `1` habilita HTTP live (Fase 2) |
 | `AG_DECISIONS_LOG` | activity_logger | auto-detect |
 
 ## Testing
