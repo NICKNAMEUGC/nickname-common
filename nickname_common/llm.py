@@ -82,6 +82,33 @@ XAI_CHAT_URL = "https://api.x.ai/v1/chat/completions"
 XAI_LIVE_ENV = "NK_XAI_LIVE"
 XAI_KEY_ENV = "XAI_API_KEY"
 
+# --- Enrutador (OpenRouter) ---------------------------------------------------
+# Un unico punto de control de gasto, eleccion de modelo por tarea y libertad
+# para cambiar de proveedor sin tocar cada repo. Contratado por Diego el
+# 2026-08-25 tras la auditoria del gasto de Gemini.
+#
+# FAIL-SAFE: por defecto NO enruta. Encender es explicito y por servicio
+# (NK_ROUTER=openrouter), asi que ningun agente cambia de camino por accidente.
+ROUTER_ENV = "NK_ROUTER"
+ROUTER_KEY_ENV = "OPENROUTER_API_KEY"
+ROUTER_AGENT_ENV = "NK_AGENT_NAME"
+OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# tier -> slug de OpenRouter. La familia se conserva: enrutar NO es cambiar de
+# modelo a escondidas. Cambiar de modelo es una decision aparte y explicita.
+_ROUTER_SLUGS = {
+    "gemini_flash": "google/gemini-2.5-flash",
+    "gemini_pro": "google/gemini-2.5-pro",
+    "claude_sonnet": "anthropic/claude-sonnet-4",
+    "grok_fast": "x-ai/grok-3-mini",
+    "grok_quality": "x-ai/grok-4",
+}
+
+# Tiers que NO pueden pasar por el enrutador. No es pereza: OpenRouter es un
+# API de chat. Ni embeddings ni generacion de imagen tienen paridad, y colarlos
+# romperia el RAG de Nicky y el carrusel de LinkedIn en silencio.
+_ROUTER_UNSUPPORTED = {"imagen"}
+
 _FAMILY_PREFIXES = {
     "gemini_flash": ("gemini-",),
     "gemini_pro": ("gemini-",),
@@ -214,6 +241,44 @@ def gemini_config_rest(thinking_budget=0, **kwargs) -> dict:
     return cfg
 
 
+class RouterNotAvailable(ProviderNotConfigured):
+    """El tier no puede enrutarse (embeddings/imagen) o falta la key."""
+
+
+def router_enabled() -> bool:
+    """¿Este servicio enruta? Fail-safe: sin la var, va directo al proveedor."""
+    return os.getenv(ROUTER_ENV, "").strip().lower() == "openrouter"
+
+
+def router_slug(tier: str) -> str:
+    """Slug de OpenRouter para el tier. Conserva familia y modelo."""
+    if tier not in _DEFAULTS:
+        raise KeyError(f"Tier de modelo desconocido: {tier!r}")
+    if tier in _ROUTER_UNSUPPORTED:
+        raise RouterNotAvailable(
+            f"El tier {tier!r} no se enruta: OpenRouter es un API de chat y no hay "
+            "paridad de embeddings ni de generacion de imagen. Sigue yendo directo."
+        )
+    slug = os.getenv(ENV_PREFIX + tier.upper() + "_SLUG", _ROUTER_SLUGS[tier])
+    return slug
+
+
+def _router_headers(key: str) -> dict[str, str]:
+    """Cabeceras del enrutador.
+
+    `X-Title` viaja con el nombre del agente: OpenRouter lo usa para desglosar el
+    gasto POR AGENTE en su panel, que es justo lo que la facturacion de Google no
+    daba. Sin NK_AGENT_NAME el gasto se mezcla y el desglose no sirve de nada.
+    """
+    agente = os.getenv(ROUTER_AGENT_ENV, "").strip() or "nickname-sin-identificar"
+    return {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "X-Title": agente,
+        "HTTP-Referer": "https://nickname.com",
+    }
+
+
 def complete(
     tier: str,
     messages: list[Mapping[str, str]],
@@ -230,22 +295,45 @@ def complete(
     El default no llama a la red (Phase 1 dry / sin billing).
     """
     provider = provider_of(tier)
-    if provider != "xai":
-        raise NotImplementedError(
-            f"complete() Fase 1 solo implementa xAI; {provider} sigue en su SDK"
-        )
-    model = get_model(tier)
-    key = os.getenv(XAI_KEY_ENV, "").strip()
-    if http_post is None:
-        if not key:
-            raise ProviderNotConfigured(
-                "XAI_API_KEY no está provisionada (adapter dry, Fase 1)"
+    enrutado = router_enabled()
+
+    if enrutado:
+        # El slug valida de paso que el tier sea enrutable (imagen/embeddings no).
+        model = router_slug(tier)
+        url = OPENROUTER_CHAT_URL
+        key = os.getenv(ROUTER_KEY_ENV, "").strip()
+        if http_post is None:
+            if not key:
+                raise RouterNotAvailable(
+                    f"{ROUTER_ENV}=openrouter pero falta {ROUTER_KEY_ENV}. No se cae "
+                    "al proveedor directo a proposito: enrutar a medias deja gasto "
+                    "fuera del unico punto de control."
+                )
+            http_post = _urllib_post
+        headers = _router_headers(key or "test")
+    else:
+        if provider != "xai":
+            raise NotImplementedError(
+                f"complete() sin enrutador solo implementa xAI; {provider} sigue en "
+                f"su SDK. Para enrutarlo: {ROUTER_ENV}=openrouter"
             )
-        if os.getenv(XAI_LIVE_ENV, "") != "1":
-            raise ProviderNotConfigured(
-                "llamadas live a xAI gated (NK_XAI_LIVE!=1); Fase 1 dry adapter"
-            )
-        http_post = _urllib_post
+        model = get_model(tier)
+        url = XAI_CHAT_URL
+        key = os.getenv(XAI_KEY_ENV, "").strip()
+        if http_post is None:
+            if not key:
+                raise ProviderNotConfigured(
+                    "XAI_API_KEY no está provisionada (adapter dry, Fase 1)"
+                )
+            if os.getenv(XAI_LIVE_ENV, "") != "1":
+                raise ProviderNotConfigured(
+                    "llamadas live a xAI gated (NK_XAI_LIVE!=1); Fase 1 dry adapter"
+                )
+            http_post = _urllib_post
+        headers = {
+            "Authorization": f"Bearer {key or 'test'}",
+            "Content-Type": "application/json",
+        }
 
     body: dict[str, Any] = {
         "model": model,
@@ -253,6 +341,10 @@ def complete(
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
+    if enrutado:
+        # Sin esto OpenRouter devuelve tokens pero no coste, y el contador del
+        # Command Center se quedaria otra vez sin la cifra que importa.
+        body["usage"] = {"include": True}
     if json_schema is not None:
         body["response_format"] = {
             "type": "json_schema",
@@ -263,14 +355,11 @@ def complete(
             },
         }
 
-    headers = {
-        "Authorization": f"Bearer {key or 'test'}",
-        "Content-Type": "application/json",
-    }
-    status, raw = http_post(XAI_CHAT_URL, headers, body, timeout)
+    status, raw = http_post(url, headers, body, timeout)
     if status != 200:
+        etiqueta = "OpenRouter" if enrutado else "xAI"
         raise ProviderNotConfigured(
-            f"xAI chat/completions HTTP {status}: {raw[:200]}"
+            f"{etiqueta} chat/completions HTTP {status}: {raw[:200]}"
         )
     payload = json.loads(raw)
     text = (
@@ -290,10 +379,13 @@ def complete(
         for k in ("prompt_tokens", "completion_tokens", "total_tokens")
         if k in usage_raw
     }
+    if enrutado and usage_raw.get("cost") is not None:
+        # Se guarda en milesimas de dolar para no meter floats en un dict[str, int].
+        usage["cost_micros"] = int(round(float(usage_raw["cost"]) * 1_000_000))
     return LLMResult(
         text=text,
         parsed_json=parsed,
-        provider=provider,
+        provider=f"openrouter:{provider}" if enrutado else provider,
         model=model,
         http_status=status,
         usage=usage,
