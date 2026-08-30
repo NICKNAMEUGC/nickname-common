@@ -56,6 +56,7 @@ from nickname_common.models import (
 - `gemini_config_sdk()` / `gemini_config_rest()` ponen `thinking_budget=0` por defecto (protege `max_output_tokens`).
 - ⚠️ `gemini-2.5-pro` RECHAZA `thinking_budget=0` (400) → para el tier `gemini_pro` pasar `thinking_budget=None`.
 - xAI Fase 1 (dry): `complete(tier, messages, ...)` solo para `grok_*`. Sin `XAI_API_KEY` o sin `NK_XAI_LIVE=1` falla cerrado y no llama a la red. Tests inyectan `http_post`. Grok no cubre embeddings ni imagen (`capabilities()`).
+- **Cascada de fallback** (mandato 2026-08-31, `.ag/decisions_log.md` → LLM-FALLBACK-OPENROUTER-MANDATORY): con `NK_ROUTER=openrouter`, un fallo de TRANSPORTE (HTTP ≥400, red, timeout, o falta de `OPENROUTER_API_KEY`) cae al siguiente proveedor con credencial: `openrouter → gemini_directo (solo tiers gemini) → openai → anthropic`. Un 200 con JSON inválido NO encadena (`parsed_json=None` como siempre). `LLMResult.provider` etiqueta el leg real: `openrouter:google` / `google-direct` / `openai-fallback` / `anthropic-fallback`. Si todo falla: `CascadeExhausted` (hereda de `ProviderNotConfigured`) con la cadena de intentos sin contenido. Los legs openai/anthropic cruzan familia POR DISEÑO (el guard L-014 es de overrides de env, no de la cascada). Embeddings/imagen siguen sin enrutarse ni fallbackearse; el leg anthropic no tiene `response_format` nativo — schema por instrucción de sistema + parseo.
 - El canary de NightWatch (task 15) vigila a diario que los modelos del registro sigan vivos. xAI queda `unmonitored` hasta provisionar key (Fase 2).
 - Origen del patrón (retirada silenciosa de gemini-2.0-flash): L-014 en `.ag/learnings.md`.
 
@@ -76,6 +77,10 @@ from nickname_common.models import (
 | `NK_MODEL_<TIER>` | llm | defaults del registro |
 | `XAI_API_KEY` | llm.complete | no provisionada (Fase 1) |
 | `NK_XAI_LIVE` | llm.complete | off; `1` habilita HTTP live (Fase 2) |
+| `NK_ROUTER` / `OPENROUTER_API_KEY` / `NK_AGENT_NAME` | llm.complete (enrutador) | off; `openrouter` enruta |
+| `GEMINI_API_KEY` (alias `GOOGLE_AI_API_KEY`) | llm.complete (leg gemini_directo) | — (sin key, leg saltado) |
+| `OPENAI_API_KEY` / `NK_MODEL_OPENAI_FALLBACK` | llm.complete (leg openai) | — / `gpt-4o-mini` |
+| `ANTHROPIC_API_KEY` / `NK_MODEL_ANTHROPIC_FALLBACK` | llm.complete (leg anthropic) | — / `claude-haiku-4-5-20251001` |
 | `AG_DECISIONS_LOG` | activity_logger | auto-detect |
 
 ## Testing

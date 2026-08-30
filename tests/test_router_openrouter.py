@@ -15,7 +15,10 @@ from nickname_common import llm
 @pytest.fixture(autouse=True)
 def _entorno_limpio(monkeypatch):
     for var in (llm.ROUTER_ENV, llm.ROUTER_KEY_ENV, llm.ROUTER_AGENT_ENV,
-                llm.XAI_KEY_ENV, llm.XAI_LIVE_ENV):
+                llm.XAI_KEY_ENV, llm.XAI_LIVE_ENV,
+                llm.GEMINI_KEY_ENV, llm.GEMINI_KEY_FALLBACK_ENV,
+                llm.OPENAI_KEY_ENV, llm.ANTHROPIC_KEY_ENV,
+                llm.OPENAI_FALLBACK_MODEL_ENV, llm.ANTHROPIC_FALLBACK_MODEL_ENV):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -42,14 +45,21 @@ class TestFailSafe:
         monkeypatch.setenv(llm.ROUTER_ENV, "true")
         assert llm.router_enabled() is False, "solo el valor 'openrouter' enruta"
 
-    def test_enrutador_sin_key_falla_en_vez_de_ir_por_detras(self, monkeypatch):
+    def test_enrutador_sin_key_ni_fallbacks_agota_la_cascada(self, monkeypatch):
+        """Mandato 2026-08-31 (LLM-FALLBACK-OPENROUTER-MANDATORY): la falta de
+        OPENROUTER_API_KEY ya no para el pipeline con RouterNotAvailable — se
+        salta el leg y sigue la cascada. Sin NINGUNA credencial, la cascada se
+        agota sin tocar la red y el error resume la cadena de intentos."""
         monkeypatch.setenv(llm.ROUTER_ENV, "openrouter")
-        with pytest.raises(llm.RouterNotAvailable) as exc:
+        with pytest.raises(llm.CascadeExhausted) as exc:
             llm.complete("gemini_flash", [{"role": "user", "content": "hola"}])
-        assert llm.ROUTER_KEY_ENV in str(exc.value)
-        assert "a medias" in str(exc.value), (
-            "enrutar a medias deja gasto fuera del unico punto de control"
-        )
+        mensaje = str(exc.value)
+        assert "openrouter:google(sin-credencial)" in mensaje
+        assert "google-direct(sin-credencial)" in mensaje
+        assert "openai-fallback(sin-credencial)" in mensaje
+        assert "anthropic-fallback(sin-credencial)" in mensaje
+        # Compat: los consumidores que capturan ProviderNotConfigured siguen bien.
+        assert isinstance(exc.value, llm.ProviderNotConfigured)
 
 
 class TestEnrutado:
@@ -64,7 +74,8 @@ class TestEnrutado:
         assert cap["body"]["model"] == "google/gemini-2.5-pro", (
             "enrutar no puede cambiar de modelo a escondidas"
         )
-        assert res.provider == "openrouter:gemini"
+        # Etiqueta del leg (mandato 2026-08-31): familia del slug de OpenRouter.
+        assert res.provider == "openrouter:google"
 
     def test_el_agente_viaja_para_poder_desglosar_el_gasto(self, monkeypatch):
         monkeypatch.setenv(llm.ROUTER_ENV, "openrouter")
