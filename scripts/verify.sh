@@ -2,6 +2,25 @@
 set -euo pipefail
 echo "=== Verify: nickname-common ==="
 
+# Revisa el índice: también detecta copias añadidas con git add --force.
+# La CI reutiliza sólo este guard, sin instalar ni ejecutar nada más.
+python3 - <<'PY'
+import re
+import subprocess
+import sys
+
+paths = subprocess.check_output(["git", "ls-files", "-z"]).split(b"\0")
+residual = re.compile(rb"(?:\.git|\.github|nickname_common|scripts) [0-9]+(?:/|$)")
+count = sum(bool(residual.match(path)) for path in paths if path)
+if count:
+    print(f"FAIL: {count} archivos versionados en copias numeradas residuales")
+    sys.exit(1)
+print("OK: sin copias numeradas residuales versionadas")
+PY
+if [ "${1:-}" = "--check-residuals" ]; then
+  exit 0
+fi
+
 # 1. Check Python
 python3 --version
 

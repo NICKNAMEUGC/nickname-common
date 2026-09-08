@@ -7,3 +7,9 @@ build/
 .venv/
 .env
 *.egg
+
+# Copias numeradas de estas carpetas; nunca son fuentes canónicas.
+/.git [0-9]*/
+/.github [0-9]*/
+/nickname_common [0-9]*/
+/scripts [0-9]*/
