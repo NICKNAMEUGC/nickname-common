@@ -37,9 +37,6 @@ python3 -m pytest tests/ -q --tb=short
 
 # 4. Check forbidden tokens (no hardcoded secrets)
 echo "--- Checking forbidden tokens ---"
-if grep -rn "ODOO_API_KEY\|HUBSPOT_ACCESS_TOKEN\|ANTHROPIC_API_KEY" --include="*.py" nickname_common/ 2>/dev/null | grep -v "os.getenv\|os.environ\|\.env\|config\." | head -5; then
-  echo "FAIL: Possible hardcoded secrets found!"
-  exit 1
-fi
+python3 scripts/check_source_secrets.py nickname_common/
 
 echo "OK: All checks passed"
