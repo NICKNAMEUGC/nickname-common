@@ -37,6 +37,7 @@ def test_all_models_applies_overrides(monkeypatch):
     assert models["imagen"] == "imagen-5.0"
     assert set(models) == {
         "gemini_flash",
+        "gemini_flash_lite",
         "gemini_pro",
         "imagen",
         "claude_sonnet",
