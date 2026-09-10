@@ -4,7 +4,9 @@
 Librería Python compartida por los agentes del ecosistema (~14 repos la consumen).
 Solo stdlib, cero dependencias externas. Aporta: logging estándar, validación de
 config, health checks, clientes Odoo/HubSpot, registro central de modelos LLM,
-eval harness, activity logging y modelos de datos.
+presupuesto/observabilidad de gasto LLM (`budget.py`, `cost_catalog.py`,
+`models/llm_usage.py`), huellas de idempotencia (`fingerprint.py`), eval
+harness, activity logging y modelos de datos.
 
 GitHub: https://github.com/NICKNAMEUGC/nickname-common · v0.1.0 · Python >=3.12 · CI: `.github/workflows/verify.yml` (pytest en PR)
 
@@ -46,11 +48,16 @@ from nickname_common.models import (
     HealthCheck, HealthResponse, ServiceStatus,
     AutomationJob, AutomationSeverity, AutomationsResponse,
     ActivityEntry, ActivityLevel,
+    AutomationRunV1, LLMUsageEventV1, RunStatus, SourceStatus, LLMOutcome, CostSource,
 )
+from nickname_common.budget import BudgetGuard, BudgetStore, BudgetStatus, BudgetExhausted, BudgetBlockedReason
+from nickname_common.cost_catalog import estimate_cost_micros, known_models, CATALOG_VERSION
+from nickname_common.fingerprint import fingerprint, idempotency_key
 ```
 
 ## Registro LLM (`llm.py`) — fuente única de nombres de modelo
-- Tiers: `gemini_flash`, `gemini_pro`, `imagen`, `claude_sonnet`, `grok_fast`, `grok_quality` → `get_model(tier)`.
+- Tiers: `gemini_flash`, `gemini_flash_lite`, `gemini_pro`, `imagen`, `claude_sonnet`, `grok_fast`, `grok_quality` → `get_model(tier)`.
+- `gemini_flash_lite` (2026-09-11, SPEC-RAILWAY-AUTOMATION-MIGRATION-20260911 WI-1): tier de coste mínimo para los jobs recurrentes en Railway — clasificar un delta ya acotado, resumir comentarios anonimizados. Misma familia/capacidades que `gemini_flash` (`capabilities("gemini_flash_lite") == capabilities("gemini_flash")`), mismo `thinking_budget=0` por defecto, mismo trato en la cascada (`google-direct` incluido en `_GEMINI_DIRECT_TIERS`). Slug OpenRouter: `google/gemini-2.5-flash-lite`.
 - Override de emergencia sin deploy: env `NK_MODEL_<TIER>` (p.ej. `NK_MODEL_GEMINI_FLASH`) en Railway.
 - Guard L-014: un override no puede cruzar de familia (`NK_MODEL_GEMINI_FLASH=grok-4` → `CrossProviderOverrideError`).
 - `gemini_config_sdk()` / `gemini_config_rest()` ponen `thinking_budget=0` por defecto (protege `max_output_tokens`).
@@ -65,6 +72,75 @@ from nickname_common.models import (
 - Convención para CONSUMIDORES con golden set propio: tests marcados `@pytest.mark.eval` llaman al LLM REAL → excluir en su CI con `pytest -m "not eval"`, correr aparte con `pytest -m eval -v` (con keys). Ejemplo real: `nickname-management-gmail` (`management_inbox_classification` en `.ag/contracts/governance.yaml`, `eval_gate: pytest -m eval ≥0.85`).
 - Este repo NO tiene hoy tests `eval` propios ni marker registrado; su CI/`verify.sh` corren `pytest tests/` sin filtro `-m` (ver Testing). Si se añade un test `eval` aquí, hay que sumar `-m "not eval"` a `verify.yml`/`verify.sh` o correrá en CI contra un LLM real sin keys.
 - Gate: cambio de modelo o prompt en un servicio con golden set debe pasar su eval antes de deploy.
+
+## Observabilidad y presupuesto LLM (WI-1, SPEC-RAILWAY-AUTOMATION-MIGRATION-20260911)
+
+Nace del incidente de agotamiento de límites por ejecuciones recurrentes sobre contexto
+conversacional largo (supervisión de Room Service cada 15 min, >200k tokens por pasada).
+Cuatro piezas, cada una en su propio módulo, cero dependencias externas:
+
+- **`models/llm_usage.py`** — `AutomationRunV1` (una ejecución de un job: huella,
+  si hubo novedad, si hizo falta LLM) y `LLMUsageEventV1` (una llamada real o
+  bloqueada: proveedor, modelo, tokens, coste, motivo). Invariante DURO
+  reforzado en `__post_init__` — no una convención: `cost_source="unavailable"`
+  exige `cost_micros=None`; `cost_source` en `{provider_response, catalog}`
+  exige `cost_micros` con valor. Construir uno inconsistente lanza
+  `ValueError` en el momento, no produce un "0 gastado" silencioso más tarde.
+  Ninguno de los dos modelos lleva PII, prompt ni respuesta — son metadatos
+  de ejecución y gasto exclusivamente.
+- **`budget.py`** — `BudgetGuard`: corte de gasto mensual fail-closed
+  (`check_before_call()`) + auditoría post-hoc del tope por llamada
+  (`check_call_cost()`, el coste real solo se conoce tras la respuesta) +
+  registro (`record_call()`, un `cost_micros=None` NUNCA suma como 0). El
+  estado de gasto acumulado lo persiste el CONSUMIDOR detrás del protocolo
+  `BudgetStore` (Railway Volume, tabla, lo que tenga) — este módulo no sabe
+  de ficheros ni de DBs, y no serializa nada por sí mismo: un store con
+  escritura concurrente debe serializarse en el propio store (ver tests de
+  concurrencia en `tests/test_budget.py` para el patrón con `threading.Lock`).
+  Un store que lanza excepción o devuelve un negativo BLOQUEA
+  (`BudgetBlockedReason.STORE_UNAVAILABLE`) — nunca se interpreta como
+  presupuesto disponible.
+- **`cost_catalog.py`** — fallback de coste SOLO para cuando el proveedor no
+  lo informa (p.ej. el leg `google-direct`, que da tokens pero nunca coste).
+  El leg OpenRouter primario SÍ trae coste real vía `usage.include=True` y no
+  pasa por aquí. Catálogo deliberadamente corto: solo `gemini-2.5-pro`
+  (verificado 2026-08-25 al céntimo contra `cost_micros` reales). Añadir un
+  modelo sin verificarlo así está prohibido — un precio no verificado que se
+  usara para "cortar presupuesto" o "declarar ahorro" sería exactamente el
+  antipatrón que la SPEC prohíbe en su §17. Modelo ausente → `None`, nunca un
+  número inventado.
+- **`fingerprint.py`** — `fingerprint(obj)` (SHA-256 de JSON canónico,
+  estable ante reordenar claves de dict) e `idempotency_key(*parts)` (clave
+  legible tipo `"feedback:2026-09-10"`, construida SIEMPRE con datos del
+  periodo, nunca con la hora de ejecución). Es lo que permite "huella sin
+  cambios → cero LLM" (checkers de delta) y "mismo periodo → no reprocesar"
+  (informes diarios idempotentes).
+
+Patrón de uso combinado en un job:
+```python
+from nickname_common.fingerprint import fingerprint, idempotency_key
+from nickname_common.budget import BudgetGuard, BudgetExhausted
+from nickname_common.models import AutomationRunV1, LLMUsageEventV1, CostSource
+from nickname_common import llm
+from nickname_common.cost_catalog import estimate_cost_micros
+
+huella = fingerprint({"sha": sha, "ci": ci_status})
+if huella == huella_anterior:
+    return  # AutomationRunV1(changed=False, llm_required=False, llm_calls=0)
+
+try:
+    guard.check_before_call()
+except BudgetExhausted:
+    return  # conservar resultado determinista, marcar outcome=budget_blocked
+
+resultado = llm.complete("gemini_flash_lite", mensajes, json_schema=schema)
+cost = resultado.usage.get("cost_micros")
+cost_source = CostSource.PROVIDER_RESPONSE if cost is not None else CostSource.CATALOG
+if cost is None:
+    cost = estimate_cost_micros(resultado.model, input_tokens=..., output_tokens=...)
+    cost_source = CostSource.CATALOG if cost is not None else CostSource.UNAVAILABLE
+guard.record_call(cost)
+```
 
 ## Env vars (del consumidor)
 | Variable | Módulo | Default |
