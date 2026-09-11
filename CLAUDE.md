@@ -99,7 +99,10 @@ Cuatro piezas, cada una en su propio módulo, cero dependencias externas:
   concurrencia en `tests/test_budget.py` para el patrón con `threading.Lock`).
   Un store que lanza excepción o devuelve un negativo BLOQUEA
   (`BudgetBlockedReason.STORE_UNAVAILABLE`) — nunca se interpreta como
-  presupuesto disponible.
+  presupuesto disponible. `BudgetStatus.store_error` (y `to_dict()["budget.
+  readable"]`) distingue esa causa de un mes agotado de verdad: ambas dan
+  `blocked=True`, pero solo una necesita arreglar el store en vez de esperar
+  al mes que viene.
 - **`cost_catalog.py`** — fallback de coste SOLO para cuando el proveedor no
   lo informa (p.ej. el leg `google-direct`, que da tokens pero nunca coste).
   El leg OpenRouter primario SÍ trae coste real vía `usage.include=True` y no
