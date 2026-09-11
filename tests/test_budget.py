@@ -101,6 +101,7 @@ class TestPresupuestoMensual:
         status = guard.status()
         assert status.blocked is True
         assert status.month_used_micros == 5_000_000
+        assert status.store_error is None  # agotado de verdad, no store roto
 
     def test_status_to_dict_matches_health_contract(self):
         guard = BudgetGuard(store=_MemoryStore(used_micros=1), month_limit_micros=5_000_000)
@@ -109,7 +110,9 @@ class TestPresupuestoMensual:
             "budget.month_used_micros",
             "budget.month_limit_micros",
             "budget.blocked",
+            "budget.readable",
         }
+        assert d["budget.readable"] is True
 
 
 # --- Presupuesto: auditoría por llamada ----------------------------------
@@ -183,6 +186,19 @@ class TestFailClosed:
         status = guard.status()
         assert status.blocked is True
         assert status.month_limit_micros == 5_000_000
+
+    def test_broken_store_is_distinguishable_from_real_exhaustion(self):
+        """blocked=True por sí solo no basta para diagnosticar: un store roto
+        y un mes agotado de verdad exigen respuestas distintas."""
+        broken = BudgetGuard(store=_BrokenStore(), month_limit_micros=5_000_000).status()
+        exhausted = BudgetGuard(
+            store=_MemoryStore(used_micros=5_000_000), month_limit_micros=5_000_000
+        ).status()
+        assert broken.blocked is True and exhausted.blocked is True
+        assert broken.store_error is not None
+        assert exhausted.store_error is None
+        assert broken.to_dict()["budget.readable"] is False
+        assert exhausted.to_dict()["budget.readable"] is True
 
     def test_negative_reported_spend_blocks(self):
         guard = BudgetGuard(store=_NegativeStore(), month_limit_micros=5_000_000)

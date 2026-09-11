@@ -89,17 +89,20 @@ class BudgetStore(Protocol):
 
 @dataclass(frozen=True)
 class BudgetStatus:
-    """Forma exacta que espera el health del servicio (SPEC §5.3)."""
+    """Forma exacta que espera el health del servicio (SPEC §5.3), más
+    `store_error` para distinguir presupuesto agotado de store no legible."""
 
     month_used_micros: int
     month_limit_micros: int
     blocked: bool
+    store_error: str | None = None
 
     def to_dict(self) -> dict:
         return {
             "budget.month_used_micros": self.month_used_micros,
             "budget.month_limit_micros": self.month_limit_micros,
             "budget.blocked": self.blocked,
+            "budget.readable": self.store_error is None,
         }
 
 
@@ -163,14 +166,23 @@ class BudgetGuard:
         """Estado para el health del servicio. NO lanza: un store roto se
         refleja como `blocked=True` con el límite conocido, para que el
         endpoint de salud siga respondiendo (ver SPEC §5.3: "Un health=200
-        acredita proceso y contrato técnico", no que haya presupuesto)."""
+        acredita proceso y contrato técnico", no que haya presupuesto).
+
+        `store_error` distingue las dos causas de `blocked=True` que un
+        consumidor NO debe tratar igual: presupuesto agotado de verdad
+        (`store_error=None`, hay certeza del gasto) frente a "no se pudo leer
+        el gasto con certeza" (`store_error` con el motivo). Colapsar ambas
+        en un solo booleano escondería justo el caso — log corrupto, volumen
+        no montado — que más urge diagnosticar distinto de un simple "se
+        acabó el mes"."""
         try:
             used = self._safe_used_micros()
-        except BudgetExhausted:
+        except BudgetExhausted as exc:
             return BudgetStatus(
                 month_used_micros=self._month_limit_micros,
                 month_limit_micros=self._month_limit_micros,
                 blocked=True,
+                store_error=str(exc),
             )
         return BudgetStatus(
             month_used_micros=used,
