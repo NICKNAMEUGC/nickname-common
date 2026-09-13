@@ -38,7 +38,7 @@ from dataclasses import dataclass
 # Versionado explícito: cualquier LLMUsageEventV1 con cost_source="catalog"
 # debería poder trazarse a la versión del catálogo que produjo esa cifra si
 # el consumidor decide guardarla (este módulo no la persiste por sí mismo).
-CATALOG_VERSION = "2026-09-11.1"
+CATALOG_VERSION = "2026-09-13.1"
 
 
 @dataclass(frozen=True)
@@ -51,12 +51,17 @@ class ModelPrice:
 
 # Verificado 2026-08-25 contra cost_micros real de handoffs del review-fixer
 # (coincidencia exacta al céntimo) — ver .ag/api/credentials_map.md, sección
-# OpenRouter. ÚNICO precio confirmado en el ecosistema a fecha de este
-# módulo. NO añadir gemini-2.5-flash, gemini-2.5-flash-lite, grok-3-mini ni
-# grok-4 aquí hasta verificarlos igual: mientras tanto, un evento cuyo
+# OpenRouter. Flash-Lite contrastado 2026-09-13 con tarifa oficial y cargo
+# real desglosado de Google AI Studio vía OpenRouter, tier default, texto
+# sin cache ni herramientas. Recibo: docs/evidence/flash-lite-cost-20260913.json.
+# NO añadir gemini-2.5-flash, grok-3-mini ni grok-4 hasta verificarlos igual:
+# mientras tanto, un evento cuyo
 # proveedor no informe coste para esos modelos queda correctamente en
 # cost_source="unavailable" (nunca un cero ni un precio inventado).
 _PRICES: dict[str, ModelPrice] = {
+    "gemini-2.5-flash-lite": ModelPrice(
+        input_usd_per_million=0.10, output_usd_per_million=0.40
+    ),
     "gemini-2.5-pro": ModelPrice(
         input_usd_per_million=1.25, output_usd_per_million=10.00
     ),
@@ -84,8 +89,8 @@ def estimate_cost_micros(
     price = _PRICES.get(model)
     if price is None or input_tokens is None or output_tokens is None:
         return None
-    if input_tokens < 0 or output_tokens < 0:
-        raise ValueError("input_tokens/output_tokens no pueden ser negativos")
+    if type(input_tokens) is not int or type(output_tokens) is not int or input_tokens < 0 or output_tokens < 0:
+        raise ValueError("input_tokens/output_tokens deben ser enteros no negativos")
     usd = (
         input_tokens * price.input_usd_per_million
         + output_tokens * price.output_usd_per_million
