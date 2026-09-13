@@ -106,8 +106,11 @@ Cuatro piezas, cada una en su propio módulo, cero dependencias externas:
 - **`cost_catalog.py`** — fallback de coste SOLO para cuando el proveedor no
   lo informa (p.ej. el leg `google-direct`, que da tokens pero nunca coste).
   El leg OpenRouter primario SÍ trae coste real vía `usage.include=True` y no
-  pasa por aquí. Catálogo deliberadamente corto: solo `gemini-2.5-pro`
-  (verificado 2026-08-25 al céntimo contra `cost_micros` reales). Añadir un
+  pasa por aquí. Catálogo deliberadamente corto: `gemini-2.5-pro`
+  (verificado 2026-08-25) y `gemini-2.5-flash-lite` (cargo real y readback
+  del 2026-09-13, `docs/evidence/flash-lite-cost-20260913.json`). Flash-Lite
+  cubre texto estándar sin caché ni herramientas; audio, prioridad, batch y
+  descuentos no se infieren de ese precio. Añadir un
   modelo sin verificarlo así está prohibido — un precio no verificado que se
   usara para "cortar presupuesto" o "declarar ahorro" sería exactamente el
   antipatrón que la SPEC prohíbe en su §17. Modelo ausente → `None`, nunca un

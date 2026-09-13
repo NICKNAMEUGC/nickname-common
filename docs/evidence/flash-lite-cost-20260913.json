@@ -1,0 +1,57 @@
+{
+  "observed_at": "2026-09-13T12:58:02.191822+00:00",
+  "purpose": "maintenance_cost_catalog_verification",
+  "credential_consumer": "nickname-review-fixer",
+  "requested_model": "google/gemini-2.5-flash-lite",
+  "max_output_tokens": 16,
+  "request_count": 1,
+  "automatic_retries": 0,
+  "contains_business_data": false,
+  "official_pricing_url": "https://ai.google.dev/gemini-api/docs/pricing#gemini-2.5-flash-lite",
+  "provider_endpoint": "https://openrouter.ai/api/v1/chat/completions",
+  "http_status": 200,
+  "generation_id": "gen-1789304282-qPOxMQMe1xFqcuDPC965",
+  "returned_model": "google/gemini-2.5-flash-lite",
+  "provider": "Google AI Studio",
+  "service_tier": "default",
+  "usage": {
+    "prompt_tokens": 5,
+    "completion_tokens": 1,
+    "total_tokens": 6,
+    "cost": 9e-07,
+    "is_byok": false,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "cache_write_tokens": 0,
+      "audio_tokens": 0,
+      "video_tokens": 0
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 0,
+      "image_tokens": 0,
+      "audio_tokens": 0
+    }
+  },
+  "cost_details": {
+    "upstream_inference_cost": 9e-07,
+    "upstream_inference_prompt_cost": 5e-07,
+    "upstream_inference_completions_cost": 4e-07
+  },
+  "expected_usd": "9E-7",
+  "provider_usd": "9e-07",
+  "exact_decimal_match": true,
+  "readback": {
+    "id": "gen-1789304282-qPOxMQMe1xFqcuDPC965",
+    "model": "google/gemini-2.5-flash-lite",
+    "provider_name": "Google AI Studio",
+    "total_cost": 9e-07,
+    "upstream_inference_cost": 0,
+    "native_tokens_prompt": 5,
+    "native_tokens_completion": 1,
+    "native_tokens_reasoning": 0,
+    "is_byok": false,
+    "created_at": "2026-09-13T12:58:02.407Z",
+    "cancelled": false,
+    "finish_reason": "stop"
+  }
+}

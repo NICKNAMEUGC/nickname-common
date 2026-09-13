@@ -29,10 +29,10 @@ def test_zero_tokens_is_zero_not_none():
 def test_unknown_model_returns_none():
     assert (
         cost_catalog.estimate_cost_micros(
-            "gemini-2.5-flash-lite", input_tokens=100, output_tokens=50
+            "gemini-2.5-flash", input_tokens=100, output_tokens=50
         )
         is None
-    ), "flash-lite no tiene precio verificado todavía — None es correcto, no un bug"
+    ), "flash no tiene precio verificado todavía — None es correcto, no un bug"
 
 
 def test_missing_input_tokens_returns_none():
@@ -63,8 +63,34 @@ def test_negative_tokens_raise():
 
 
 def test_known_models_lists_only_verified_entries():
-    assert cost_catalog.known_models() == ("gemini-2.5-pro",)
+    assert cost_catalog.known_models() == ("gemini-2.5-flash-lite", "gemini-2.5-pro")
 
 
 def test_catalog_version_is_a_dated_string():
     assert cost_catalog.CATALOG_VERSION[:10].count("-") == 2  # YYYY-MM-DD...
+
+
+def test_flash_lite_matches_actual_provider_charge_and_individual_rates():
+    import json
+    from decimal import Decimal
+    from pathlib import Path
+
+    record = json.loads((Path(__file__).parents[1] / "docs/evidence/flash-lite-cost-20260913.json").read_text())
+    usage, costs = record["usage"], record["cost_details"]
+    assert record["requested_model"] == record["returned_model"] == "google/gemini-2.5-flash-lite"
+    assert record["provider"] == "Google AI Studio" and record["service_tier"] == "default"
+    assert Decimal(str(costs["upstream_inference_prompt_cost"])) / usage["prompt_tokens"] == Decimal("0.0000001")
+    assert Decimal(str(costs["upstream_inference_completions_cost"])) / usage["completion_tokens"] == Decimal("0.0000004")
+    actual = Decimal(str(costs["upstream_inference_cost"])) * 1_000_000
+    assert cost_catalog.estimate_cost_micros("gemini-2.5-flash-lite",
+        input_tokens=usage["prompt_tokens"], output_tokens=usage["completion_tokens"]) == round(actual)
+    assert record["readback"]["total_cost"] == usage["cost"]
+    assert cost_catalog.estimate_cost_micros("gemini-2.5-flash-lite",
+        input_tokens=1000, output_tokens=1000) == 500
+
+
+def test_invalid_counters_cannot_become_a_cost():
+    import pytest
+    for invalid in (True, 1.5, "12", float("nan")):
+        with pytest.raises(ValueError):
+            cost_catalog.estimate_cost_micros("gemini-2.5-flash-lite", input_tokens=invalid, output_tokens=1)
