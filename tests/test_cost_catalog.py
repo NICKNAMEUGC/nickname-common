@@ -29,10 +29,10 @@ def test_zero_tokens_is_zero_not_none():
 def test_unknown_model_returns_none():
     assert (
         cost_catalog.estimate_cost_micros(
-            "gemini-2.5-flash", input_tokens=100, output_tokens=50
+            "unverified-model", input_tokens=100, output_tokens=50
         )
         is None
-    ), "flash no tiene precio verificado todavía — None es correcto, no un bug"
+    ), "Un modelo no verificado conserva coste desconocido"
 
 
 def test_missing_input_tokens_returns_none():
@@ -63,7 +63,22 @@ def test_negative_tokens_raise():
 
 
 def test_known_models_lists_only_verified_entries():
-    assert cost_catalog.known_models() == ("gemini-2.5-flash-lite", "gemini-2.5-pro")
+    assert cost_catalog.known_models() == ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro")
+
+
+def test_flash_catalog_matches_natural_single_request_charge():
+    import json
+    from decimal import Decimal
+    from pathlib import Path
+    receipt = json.loads((Path(__file__).parents[1] / "docs/evidence/flash-cost-20260913.json").read_text())
+    row = receipt["natural_usage"]
+    assert row["requests"] == 1 and receipt["synthetic_calls"] == 0
+    assert row["model"] == "google/gemini-2.5-flash"
+    actual_micros = Decimal(str(row["usage"])) * 1_000_000
+    assert cost_catalog.estimate_cost_micros("gemini-2.5-flash",
+        input_tokens=row["prompt_tokens"], output_tokens=row["completion_tokens"]) == actual_micros
+    assert cost_catalog.estimate_cost_micros("gemini-2.5-flash",
+        input_tokens=None, output_tokens=1) is None
 
 
 def test_catalog_version_is_a_dated_string():
