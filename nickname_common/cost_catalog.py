@@ -38,7 +38,7 @@ from dataclasses import dataclass
 # Versionado explícito: cualquier LLMUsageEventV1 con cost_source="catalog"
 # debería poder trazarse a la versión del catálogo que produjo esa cifra si
 # el consumidor decide guardarla (este módulo no la persiste por sí mismo).
-CATALOG_VERSION = "2026-09-13.1"
+CATALOG_VERSION = "2026-09-13.2"
 
 
 @dataclass(frozen=True)
@@ -54,11 +54,18 @@ class ModelPrice:
 # OpenRouter. Flash-Lite contrastado 2026-09-13 con tarifa oficial y cargo
 # real desglosado de Google AI Studio vía OpenRouter, tier default, texto
 # sin cache ni herramientas. Recibo: docs/evidence/flash-lite-cost-20260913.json.
-# NO añadir gemini-2.5-flash, grok-3-mini ni grok-4 hasta verificarlos igual:
+# Flash contrastado sin generar llamadas: cargo natural de 1 petición del
+# 2026-09-10 (462 tokens entrada, 47 salida, 256 microUSD reportados), tarifas
+# oficiales y GET /models. Ver docs/evidence/flash-cost-20260913.json.
+# No reconstruye históricos sin tokens ni convierte una estimación de catálogo
+# en factura del proveedor directo. NO añadir grok-3-mini ni grok-4 sin verificar:
 # mientras tanto, un evento cuyo
 # proveedor no informe coste para esos modelos queda correctamente en
 # cost_source="unavailable" (nunca un cero ni un precio inventado).
 _PRICES: dict[str, ModelPrice] = {
+    "gemini-2.5-flash": ModelPrice(
+        input_usd_per_million=0.30, output_usd_per_million=2.50
+    ),
     "gemini-2.5-flash-lite": ModelPrice(
         input_usd_per_million=0.10, output_usd_per_million=0.40
     ),

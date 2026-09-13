@@ -1,0 +1,26 @@
+{
+  "observed_at": "2026-09-13T21:16:15.447207+00:00",
+  "source": "https://openrouter.ai/api/v1/activity?date=2026-09-10",
+  "source_documentation": "https://openrouter.ai/docs/api/api-reference/analytics/get-user-activity",
+  "official_pricing": "https://ai.google.dev/gemini-api/docs/pricing#gemini-2.5-flash",
+  "pricing_api": "https://openrouter.ai/api/v1/models",
+  "scope": "standard text only; catalog estimate, not direct-provider invoice; no historical backfill without tokens",
+  "natural_usage": {
+    "date": "2026-09-10 00:00:00",
+    "model": "google/gemini-2.5-flash",
+    "provider_name": "google-vertex",
+    "requests": 1,
+    "prompt_tokens": 462,
+    "completion_tokens": 47,
+    "reasoning_tokens": 0,
+    "usage": 0.000256,
+    "byok_usage_inference": 0
+  },
+  "catalog_rates_usd_per_million": {
+    "input": 0.3,
+    "output": 2.5
+  },
+  "computed_cost_micros": "256.1",
+  "provider_reported_cost_micros": "256.000000",
+  "synthetic_calls": 0
+}
