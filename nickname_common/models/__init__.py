@@ -19,6 +19,14 @@ from nickname_common.models.health import (
     HealthResponse,
     ServiceStatus,
 )
+from nickname_common.models.llm_usage import (
+    AutomationRunV1,
+    CostSource,
+    LLMOutcome,
+    LLMUsageEventV1,
+    RunStatus,
+    SourceStatus,
+)
 from nickname_common.models.task import (
     Task,
     TaskPriority,

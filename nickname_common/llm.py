@@ -55,6 +55,19 @@ permitir thinking dinámico (tiers de calidad, ej. redacción con gemini_pro).
 GOTCHA (verificado 2026-06-12): gemini-2.5-pro RECHAZA thinking_budget=0 con
 400 "Budget 0 is invalid. This model only works in thinking mode". Para el
 tier gemini_pro usar SIEMPRE thinking_budget=None.
+
+Tier `gemini_flash_lite` (2026-09-11, SPEC-RAILWAY-AUTOMATION-MIGRATION-20260911
+WI-1): jobs Railway recurrentes de bajo coste — clasificar un delta ya acotado,
+resumir comentarios anonimizados. Misma familia y mismo manejo de
+thinking_budget que gemini_flash (0 por defecto). NO sustituye a gemini_flash
+en pipelines que ya pasan su eval con ese tier: cambiar de tier un consumidor
+existente exige revalidar su eval, igual que cualquier cambio de modelo. El
+slug de OpenRouter sigue el mismo patrón que los demás tiers Gemini
+(`google/<model-id>`); el canary diario de NightWatch (task 15) lo confirma
+vivo igual que al resto del registro. Coste, presupuesto y atribución por
+llamada de este tier viven en `nickname_common.budget` /
+`nickname_common.models.llm_usage` / `nickname_common.cost_catalog`, no aquí:
+este módulo solo resuelve NOMBRE de modelo y transporte.
 """
 
 from __future__ import annotations
@@ -80,6 +93,7 @@ _LOG = logging.getLogger("nickname_common.llm")
 _DEFAULTS = {
     # Gemini
     "gemini_flash": "gemini-2.5-flash",       # clasificación, triaje, alto volumen
+    "gemini_flash_lite": "gemini-2.5-flash-lite",  # jobs Railway de bajo coste (SPEC-RAILWAY-AUTOMATION-MIGRATION-20260911): clasificación de un delta acotado, resumen pequeño de comentarios anonimizados. NUNCA redacción que deba superar un eval de calidad — para eso gemini_flash.
     "gemini_pro": "gemini-2.5-pro",           # redacción de calidad (drafts voice-cloned)
     # NanoBanana (n8n LinkedIn/newsletter). ⚠️ Cambio de familia de API respecto al
     # anterior imagen-4.0-generate-001: este modelo se llama via :generateContent
@@ -121,6 +135,7 @@ OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 # modelo a escondidas. Cambiar de modelo es una decision aparte y explicita.
 _ROUTER_SLUGS = {
     "gemini_flash": "google/gemini-2.5-flash",
+    "gemini_flash_lite": "google/gemini-2.5-flash-lite",
     "gemini_pro": "google/gemini-2.5-pro",
     "claude_sonnet": "anthropic/claude-sonnet-4",
     "grok_fast": "x-ai/grok-3-mini",
@@ -166,6 +181,7 @@ _GEMINI_SCHEMA_DROP = {
 
 _FAMILY_PREFIXES = {
     "gemini_flash": ("gemini-",),
+    "gemini_flash_lite": ("gemini-",),
     "gemini_pro": ("gemini-",),
     "imagen": ("gemini-", "imagen-"),
     "claude_sonnet": ("claude-",),
@@ -175,6 +191,13 @@ _FAMILY_PREFIXES = {
 
 _CAPABILITIES = {
     "gemini_flash": {
+        "text": True,
+        "json_schema": True,
+        "embeddings": True,
+        "images": False,
+        "thinking_budget": True,
+    },
+    "gemini_flash_lite": {
         "text": True,
         "json_schema": True,
         "embeddings": True,
@@ -462,7 +485,7 @@ def complete(
 # —incluido un 200 cuyo envelope no es JSON— propaga sin relitigarse.
 _TRANSPORT_ERRORS = (_TransportFailure, OSError, http.client.HTTPException)
 
-_GEMINI_DIRECT_TIERS = ("gemini_flash", "gemini_pro")
+_GEMINI_DIRECT_TIERS = ("gemini_flash", "gemini_flash_lite", "gemini_pro")
 
 
 def _complete_routed(
