@@ -664,13 +664,32 @@ def _leg_openrouter(
 
 
 def _gemini_schema(schema: Any) -> Any:
-    """Limpia claves de JSON Schema que el responseSchema de Gemini rechaza."""
+    """Adapta JSON Schema al subconjunto ``responseSchema`` de Gemini REST.
+
+    Gemini representa ``T | null`` con ``type: T`` + ``nullable: true`` y
+    rechaza el array JSON Schema ``type: [T, "null"]`` con HTTP 400.  Cuando
+    el campo tiene ``enum``, ``null`` se expresa exclusivamente mediante
+    ``nullable`` para que el enum conserve valores del mismo tipo.
+
+    Las uniones de varios tipos no nulos se dejan intactas: Gemini las
+    rechazará de forma visible en vez de degradar silenciosamente el contrato.
+    """
     if isinstance(schema, dict):
-        return {
+        cleaned = {
             k: _gemini_schema(v)
             for k, v in schema.items()
             if k not in _GEMINI_SCHEMA_DROP
         }
+        schema_type = cleaned.get("type")
+        if isinstance(schema_type, list):
+            non_null = [item for item in schema_type if item != "null"]
+            if len(non_null) == 1 and len(schema_type) == 2:
+                cleaned["type"] = non_null[0]
+                cleaned["nullable"] = True
+                enum = cleaned.get("enum")
+                if isinstance(enum, list):
+                    cleaned["enum"] = [item for item in enum if item is not None]
+        return cleaned
     if isinstance(schema, list):
         return [_gemini_schema(item) for item in schema]
     return schema
