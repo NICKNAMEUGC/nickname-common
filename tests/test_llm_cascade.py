@@ -127,6 +127,50 @@ class TestLegGeminiDirecto:
         assert res.usage == {"prompt_tokens": 7, "completion_tokens": 3,
                              "total_tokens": 10}
 
+    def test_schema_nullable_usa_formato_gemini_rest(self, monkeypatch):
+        """El fallback directo no debe enviar arrays ``type`` a Gemini.
+
+        El bucle de herramientas del Review Fixer usa campos anulables y fue
+        el canario real que detectó el 400 ``Proto field is not repeating``.
+        """
+        _enrutado(monkeypatch)
+        monkeypatch.setenv(llm.GEMINI_KEY_ENV, "g-key-test")
+        post = Transporte({
+            "openrouter.ai": (403, {"error": "daily limit"}),
+            "generativelanguage.googleapis.com": (200, _gemini_ok(
+                '{"path": null, "verdict": null}'
+            )),
+        })
+        schema = {
+            "type": "object",
+            "properties": {
+                "path": {"type": ["string", "null"]},
+                "verdict": {
+                    "type": ["string", "null"],
+                    "enum": ["fix", "skip", None],
+                },
+            },
+            "required": ["path", "verdict"],
+            "additionalProperties": False,
+        }
+
+        res = llm.complete(
+            "gemini_flash",
+            [{"role": "user", "content": "termina"}],
+            json_schema=schema,
+            http_post=post,
+        )
+
+        sent = post.llamadas[1]["body"]["generationConfig"]["responseSchema"]
+        assert sent["properties"]["path"] == {
+            "type": "string", "nullable": True,
+        }
+        assert sent["properties"]["verdict"] == {
+            "type": "string", "enum": ["fix", "skip"], "nullable": True,
+        }
+        assert res.provider == "google-direct"
+        assert res.parsed_json == {"path": None, "verdict": None}
+
     def test_openrouter_sin_key_cae_a_gemini_con_warning(self, monkeypatch, caplog):
         """Antes: RouterNotAvailable. Mandato nuevo: la anomalía de config se
         loguea (sin contenido) y la cascada sigue por el leg directo."""
