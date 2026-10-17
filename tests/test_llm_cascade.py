@@ -108,7 +108,7 @@ class TestLegGeminiDirecto:
         # URL del leg directo: modelo del registro + key en query.
         assert post.llamadas[1]["url"] == (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            "gemini-2.5-flash:generateContent?key=g-key-test"
+            "gemini-3.8-flash:generateContent?key=g-key-test"
         )
         cuerpo = post.llamadas[1]["body"]
         # Conversión de messages: user→user, assistant→model.
@@ -122,7 +122,7 @@ class TestLegGeminiDirecto:
         # Tier flash: thinking_budget=0 (L-014, protege max_output_tokens).
         assert cfg["thinkingConfig"] == {"thinkingBudget": 0}
         assert res.provider == "google-direct"
-        assert res.model == "gemini-2.5-flash"
+        assert res.model == "gemini-3.8-flash"
         assert res.parsed_json == {"ok": True}
         assert res.usage == {"prompt_tokens": 7, "completion_tokens": 3,
                              "total_tokens": 10}
@@ -195,7 +195,7 @@ class TestLegGeminiDirecto:
         )
 
     def test_gemini_pro_no_manda_thinking_budget_cero(self, monkeypatch):
-        """GOTCHA L-014: gemini-2.5-pro rechaza thinking_budget=0 con 400."""
+        """GOTCHA L-014: el leg directo deja gemini_pro en razonamiento dinámico (sin thinkingConfig)."""
         _enrutado(monkeypatch)
         monkeypatch.setenv(llm.GEMINI_KEY_ENV, "g-key-test")
         post = Transporte({
@@ -207,7 +207,7 @@ class TestLegGeminiDirecto:
             "gemini_pro", [{"role": "user", "content": "x"}], http_post=post
         )
 
-        assert "gemini-2.5-pro:generateContent" in post.llamadas[1]["url"]
+        assert "gemini-4-argon:generateContent" in post.llamadas[1]["url"]
         assert "thinkingConfig" not in post.llamadas[1]["body"]["generationConfig"]
         assert res.provider == "google-direct"
 

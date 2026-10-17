@@ -13,17 +13,18 @@ from nickname_common.llm import (
 
 
 def test_get_model_defaults():
-    assert llm.get_model("gemini_flash") == "gemini-2.5-flash"
-    assert llm.get_model("gemini_pro") == "gemini-2.5-pro"
+    assert llm.get_model("gemini_flash") == "gemini-3.8-flash"
+    assert llm.get_model("gemini_pro") == "gemini-4-argon"
     assert llm.get_model("claude_sonnet").startswith("claude-")
-    assert llm.get_model("grok_fast") == "grok-3-mini"
-    assert llm.get_model("grok_quality") == "grok-4"
+    # Reparación 2026-10-17: grok-3-mini y grok-4 ya no existen en OpenRouter.
+    assert llm.get_model("grok_fast") == "grok-4.3"
+    assert llm.get_model("grok_quality") == "grok-4.7"
 
 
 def test_get_model_env_override(monkeypatch):
     monkeypatch.setenv("NK_MODEL_GEMINI_FLASH", "gemini-9-flash")
     assert llm.get_model("gemini_flash") == "gemini-9-flash"
-    assert llm.get_model("gemini_pro") == "gemini-2.5-pro"
+    assert llm.get_model("gemini_pro") == "gemini-4-argon"
 
 
 def test_get_model_unknown_tier():
@@ -40,7 +41,12 @@ def test_all_models_applies_overrides(monkeypatch):
         "gemini_flash_lite",
         "gemini_pro",
         "imagen",
+        "gemini_embedding",
         "claude_sonnet",
+        "claude_opus",
+        "claude_haiku",
+        "gpt_quality",
+        "gpt_fast",
         "grok_fast",
         "grok_quality",
     }
@@ -155,12 +161,12 @@ def test_complete_xai_injected_transport_never_hits_network(monkeypatch):
         max_tokens=8,
     )
     assert captured["url"] == llm.XAI_CHAT_URL
-    assert captured["body"]["model"] == "grok-4"
+    assert captured["body"]["model"] == llm.get_model("grok_quality")
     assert captured["body"]["max_tokens"] == 8
     assert captured["body"]["response_format"]["type"] == "json_schema"
     assert isinstance(result, LLMResult)
     assert result.provider == "xai"
-    assert result.model == "grok-4"
+    assert result.model == llm.get_model("grok_quality")
     assert result.http_status == 200
     assert result.parsed_json == {"ok": True}
     assert result.usage["total_tokens"] == 5

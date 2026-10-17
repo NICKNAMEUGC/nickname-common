@@ -15,14 +15,14 @@ from nickname_common.llm import CrossProviderOverrideError
 
 
 def test_get_model_default():
-    assert llm.get_model("gemini_flash_lite") == "gemini-2.5-flash-lite"
+    assert llm.get_model("gemini_flash_lite") == "gemini-3.5-flash-lite"
 
 
 def test_get_model_env_override_same_family(monkeypatch):
     monkeypatch.setenv("NK_MODEL_GEMINI_FLASH_LITE", "gemini-9-flash-lite")
     assert llm.get_model("gemini_flash_lite") == "gemini-9-flash-lite"
     # Los demás tiers gemini no se ven afectados por el override de éste.
-    assert llm.get_model("gemini_flash") == "gemini-2.5-flash"
+    assert llm.get_model("gemini_flash") == "gemini-3.8-flash"
 
 
 def test_env_override_cannot_cross_family(monkeypatch):
@@ -36,7 +36,7 @@ def test_provider_of_is_gemini():
 
 
 def test_router_slug_follows_google_pattern():
-    assert llm.router_slug("gemini_flash_lite") == "google/gemini-2.5-flash-lite"
+    assert llm.router_slug("gemini_flash_lite") == "google/gemini-3.5-flash-lite"
 
 
 def test_router_slug_env_override(monkeypatch):
@@ -65,8 +65,9 @@ def test_gemini_flash_lite_is_gemini_direct_eligible():
 
 
 class TestDirectLegThinkingBudget:
-    """El leg google-direct debe mandar thinking_budget=0 para flash-lite,
-    igual que para gemini_flash (solo gemini_pro es la excepción L-014)."""
+    """El leg google-direct debe mandar el razonamiento MÍNIMO para
+    flash-lite, igual que para gemini_flash (solo gemini_pro es la excepción
+    L-014). Desde D-F el mínimo depende del modelo (_GEMINI_MIN_THINKING)."""
 
     def _capturar_post(self):
         capturado = {}
@@ -98,6 +99,8 @@ class TestDirectLegThinkingBudget:
             timeout=5.0,
         )
         assert resultado.provider == "google-direct"
-        assert resultado.model == "gemini-2.5-flash-lite"
+        assert resultado.model == "gemini-3.5-flash-lite"
         gen_cfg = capturado["body"]["generationConfig"]
-        assert gen_cfg["thinkingConfig"] == {"thinkingBudget": 0}
+        # D-F (2026-10-18): gemini-3.5-flash-lite RECHAZA thinkingBudget=0
+        # (400); su razonamiento mínimo es thinkingLevel=minimal.
+        assert gen_cfg["thinkingConfig"] == {"thinkingLevel": "minimal"}

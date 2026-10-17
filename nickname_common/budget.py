@@ -48,7 +48,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 class BudgetBlockedReason(str, Enum):
@@ -63,7 +63,17 @@ class BudgetExhausted(RuntimeError):
     El consumidor debe capturar esta excepción, conservar su parte
     determinista y marcar el resultado como `llm_skipped=budget_exhausted`
     (o el motivo correspondiente) — NUNCA reintentar la llamada a ciegas.
+
+    Cuando la lanza `nickname_common.llm.complete_for`, trae además
+    `usage_event` (el LLMUsageEventV1 tipado del caso) y, si la llamada ya
+    había ocurrido (tope por llamada superado), `result` con la respuesta
+    pagada. Lanzada por el guard a mano, ambos quedan en None.
     """
+
+    # Los rellena complete_for; tipados como Any para que este módulo no
+    # dependa de llm.py ni de models.
+    usage_event: Any = None
+    result: Any = None
 
     def __init__(self, reason: BudgetBlockedReason, detail: str = ""):
         self.reason = reason

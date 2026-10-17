@@ -7,9 +7,11 @@ Módulos:
   - odoo_client: OdooService base (XML-RPC + circuit breaker + thread-safety)
   - hubspot_client: HubSpotService base (REST + rate limiting)
   - config: load_config() con validación de variables de entorno
+  - llm: registro central de modelos, cascada legada complete() y complete_for(clase)
+  - ai_policy: política del plano IA por clase de trabajo (fuente canónica)
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from nickname_common.config import load_config
 from nickname_common.health import DeepHealthChecker
