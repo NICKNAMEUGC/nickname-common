@@ -3,12 +3,13 @@
 
 Librería Python compartida por los agentes del ecosistema (~14 repos la consumen).
 Solo stdlib, cero dependencias externas. Aporta: logging estándar, validación de
-config, health checks, clientes Odoo/HubSpot, registro central de modelos LLM,
+config, health checks, clientes Odoo/HubSpot, registro central de modelos LLM y
+política del plano IA por clase de trabajo (`ai_policy.py`),
 presupuesto/observabilidad de gasto LLM (`budget.py`, `cost_catalog.py`,
 `models/llm_usage.py`), huellas de idempotencia (`fingerprint.py`), eval
 harness, activity logging y modelos de datos.
 
-GitHub: https://github.com/NICKNAMEUGC/nickname-common · v0.1.0 · Python >=3.12 · CI: `.github/workflows/verify.yml` (pytest en PR)
+GitHub: https://github.com/NICKNAMEUGC/nickname-common · v0.2.0 · Python >=3.12 · CI: `.github/workflows/verify.yml` (pytest en PR)
 
 ## Reglas del repo
 - Cero dependencias externas (`setup.py` con `install_requires=[]`). Cada agente trae las suyas (Flask, etc.).
@@ -40,7 +41,10 @@ from nickname_common.odoo_client import OdooService
 #   search / search_read / read / create / write / unlink / execute_with_context / test_connection
 from nickname_common.hubspot_client import HubSpotService
 #   REST + retry en 429 (10s x intento, max 3). search_all (paginado) / search_modified / get_associations
-from nickname_common.llm import get_model, all_models, provider_of, capabilities, complete, gemini_config_sdk, gemini_config_rest
+from nickname_common.llm import get_model, all_models, all_tiers, provider_of, capabilities, is_routable, gemini_config_sdk, gemini_config_rest
+from nickname_common.llm import complete_for, ClassNotApiExecutable, CascadeExhausted  # puerta NUEVA (plano IA, ola 1)
+from nickname_common.llm import complete    # LEGADO: se conserva para quien ya la usa; código nuevo → complete_for
+from nickname_common.ai_policy import policy_for, api_chain, subscription_chain, all_classes, as_dict, POLICY_VERSION
 from nickname_common.evals import run_golden, load_golden   # EvalReport con accuracy
 from nickname_common.activity_logger import ActivityLogger  # escribe .ag/decisions_log.md (fcntl + Lock)
 from nickname_common.models import (
@@ -56,7 +60,9 @@ from nickname_common.fingerprint import fingerprint, idempotency_key
 ```
 
 ## Registro LLM (`llm.py`) — fuente única de nombres de modelo
-- Tiers: `gemini_flash`, `gemini_flash_lite`, `gemini_pro`, `imagen`, `claude_sonnet`, `grok_fast`, `grok_quality` → `get_model(tier)`.
+- Tiers: `gemini_flash`, `gemini_flash_lite`, `gemini_pro`, `imagen`, `gemini_embedding`, `claude_sonnet`, `claude_opus`, `claude_haiku`, `gpt_quality`, `gpt_fast`, `grok_fast`, `grok_quality` → `get_model(tier)`. Los ids concretos viven SOLO en `_DEFAULTS` / `_ROUTER_SLUGS` de `llm.py` (no copiarlos aquí); `provider_of()` devuelve `gemini` | `anthropic` | `openai` | `xai`.
+- **Reparación 2026-10-17 (ola 1 del plano IA)**: `claude_sonnet` y `grok_fast`/`grok_quality` apuntaban a modelos que ya no existen (verificado por API; histórico de retiradas en el comentario de `_DEFAULTS`). Se sustituyeron por los vigentes de su familia: es reparación, no cambio de calidad. El refresco de calidad del resto (Gemini 3.x) es la decisión D-E, servicio a servicio con su eval (ola 2). Ojo al subir el pin: la familia Claude 5.x rechaza `temperature` (Opus siempre; Sonnet/Haiku con valores no default) — un consumidor que llame a Anthropic con `get_model("claude_sonnet")` y `temperature` recibirá 400.
+- Tiers nuevos (ola 1): `claude_opus`, `claude_haiku`, `gpt_quality`, `gpt_fast` (chat, enrutables) y `gemini_embedding` (NO enrutable ni de chat, como `imagen`: se llama por su endpoint con `get_model`). Guard L-014 por familia: `claude-*`, `gpt-*`, `gemini-embedding-*` (no `text-embedding-*`, que es también OpenAI). Los ids directos de xAI no son verificables sin `XAI_API_KEY`: los `grok_*` siguen dry.
 - `gemini_flash_lite` (2026-09-11, SPEC-RAILWAY-AUTOMATION-MIGRATION-20260911 WI-1): tier de coste mínimo para los jobs recurrentes en Railway — clasificar un delta ya acotado, resumir comentarios anonimizados. Misma familia/capacidades que `gemini_flash` (`capabilities("gemini_flash_lite") == capabilities("gemini_flash")`), mismo `thinking_budget=0` por defecto, mismo trato en la cascada (`google-direct` incluido en `_GEMINI_DIRECT_TIERS`). Slug OpenRouter: `google/gemini-2.5-flash-lite`.
 - Override de emergencia sin deploy: env `NK_MODEL_<TIER>` (p.ej. `NK_MODEL_GEMINI_FLASH`) en Railway.
 - Guard L-014: un override no puede cruzar de familia (`NK_MODEL_GEMINI_FLASH=grok-4` → `CrossProviderOverrideError`).
@@ -64,7 +70,16 @@ from nickname_common.fingerprint import fingerprint, idempotency_key
 - ⚠️ `gemini-2.5-pro` RECHAZA `thinking_budget=0` (400) → para el tier `gemini_pro` pasar `thinking_budget=None`.
 - xAI Fase 1 (dry): `complete(tier, messages, ...)` solo para `grok_*`. Sin `XAI_API_KEY` o sin `NK_XAI_LIVE=1` falla cerrado y no llama a la red. Tests inyectan `http_post`. Grok no cubre embeddings ni imagen (`capabilities()`).
 - **Cascada de fallback** (mandato 2026-08-31, `.ag/decisions_log.md` → LLM-FALLBACK-OPENROUTER-MANDATORY): con `NK_ROUTER=openrouter`, un fallo de TRANSPORTE (HTTP ≥400, red, timeout, o falta de `OPENROUTER_API_KEY`) cae al siguiente proveedor con credencial: `openrouter → gemini_directo (solo tiers gemini) → openai → anthropic`. Un 200 con JSON inválido NO encadena (`parsed_json=None` como siempre). `LLMResult.provider` etiqueta el leg real: `openrouter:google` / `google-direct` / `openai-fallback` / `anthropic-fallback`. Si todo falla: `CascadeExhausted` (hereda de `ProviderNotConfigured`) con la cadena de intentos sin contenido. Los legs openai/anthropic cruzan familia POR DISEÑO (el guard L-014 es de overrides de env, no de la cascada). Embeddings/imagen siguen sin enrutarse ni fallbackearse; el leg anthropic no tiene `response_format` nativo — schema por instrucción de sistema + parseo.
-- El canary de NightWatch (task 15) vigila a diario que los modelos del registro sigan vivos. xAI queda `unmonitored` hasta provisionar key (Fase 2).
+- **Plano IA — `ai_policy.py` es la FUENTE CANÓNICA de la política por clase de trabajo** (SPEC-AI-PLANE-20261017 §4; decisiones D1, D2, D3, D4 y D-A de Diego del 2026-10-17). Vive en este paquete y no en un YAML de `apps-config` porque los servicios de Railway no tienen ese repo; cualquier export (broker, Command Center) se genera con `ai_policy.as_dict()`. Clases: `clasificacion_masiva`, `cliente_dinero_tiempo_real`, `cliente_dinero_asincrono`, `codigo`, `revision`, `contexto_largo`, `coordinacion`, `embeddings`, `imagen`. Cada una declara `lane` (`api` | `subscription`), `api_chain` (pasos `{tier, via}`, vía ∈ `openrouter` / `anthropic_direct` / `openai_direct` / `gemini_direct`) y `subscription_chain` (CLIs `claude` / `codex` / `gemini` / `grok` para el broker de la ola 4; la regla «familia distinta a la del autor» de `revision` la aplica el broker). Se valida AL IMPORTAR: tier inexistente, vía incoherente con la familia o embeddings/imagen por OpenRouter rompen el arranque, no la primera llamada. La política habla de tiers, nunca de modelos.
+- **D-A (híbrido)**: Claude sale por OpenRouter con BYOK hacia la organización de Anthropic (lo absorbe el crédito de API del plan Team; cifra y cuenta en la SPEC §0) y cada agente conserva su clave OpenRouter con tope diario. Además, `claude_sonnet@anthropic_direct` es el respaldo si OpenRouter cae, pero solo se ejecuta donde existe `ANTHROPIC_API_KEY`: por decisión de Diego, únicamente `nickname-recobro-agent`, `nickname-facturas-agent` y los jobs CFO de `nickname-odoo-agent`. El BYOK se configura en la cuenta de OpenRouter, no en código.
+- **`complete_for(clase, messages, *, guard, budget_exempt=None, json_schema=None, max_tokens=1024, temperature=None, http_post=None, timeout=30, service/job_id/run_id/reason)`** — la puerta nueva. Recorre la `api_chain` de la clase reutilizando los legs de la cascada:
+  - Paso `@openrouter` solo con `NK_ROUTER=openrouter` **y** `OPENROUTER_API_KEY` (quitar `NK_ROUTER` sigue siendo el rollback sin deploy). Paso directo solo con su clave. Un paso sin credencial se salta y queda en la lista de intentos (`router-apagado` / `sin-credencial`).
+  - Solo los fallos de TRANSPORTE encadenan (HTTP ≥400, red, timeout); un 200 con JSON inválido no. Todo agotado → `CascadeExhausted` con `vía[tier](motivo)` y `exc.usage_event`, sin contenido. Clase sin `api_chain` (carril suscripción) o de tiers que no son de chat → `ClassNotApiExecutable` (ValueError), sin red.
+  - **Presupuesto obligatorio**: `guard` es un argumento requerido; `guard=None` exige `budget_exempt="<motivo>"` (si no, ValueError). Con guard: `check_before_call()` antes del primer paso (el `BudgetExhausted` sale sin tocar la red y con `exc.usage_event` budget_blocked); tras el éxito `record_call(coste)` y `check_call_cost(coste)` — si se supera el tope por llamada se propaga `BudgetExhausted` con la respuesta pagada en `exc.result`.
+  - Coste: el del proveedor (con BYOK se toma el mayor entre `usage.cost` y `cost_details.upstream_inference_cost`, para no infravalorar ni contar dos veces) → catálogo verificado → `None`/`unavailable`, nunca 0. El resultado lleva `usage_event` (`LLMUsageEventV1`, sin PII ni prompt; `service` sale de `NK_AGENT_NAME`).
+  - `LLMResult.provider` etiqueta el paso real: `openrouter:anthropic` / `openrouter:openai` / `openrouter:google` / `anthropic-direct` / `openai-direct` / `google-direct`. Diferencias con los legs legados, solo en `complete_for`: `temperature` no se envía si no se pide (Claude 5.x y GPT de razonamiento la rechazan); `anthropic-direct` usa structured outputs nativos (`output_config.format`); `openai-direct` usa `max_completion_tokens`.
+  - `complete()` legado NO cambia (salvo heredar la reparación del registro): misma cascada, mismas etiquetas `*-fallback`, `usage_event=None`.
+- El canary de NightWatch (task 15) vigila a diario que los modelos del registro sigan vivos. xAI queda `unmonitored` hasta provisionar key (Fase 2). Su lista NO se lee de aquí: vive en `nightwatch/config.yaml` (`tasks.15_model_canary.models`) del repo NightWatch y se sincroniza a mano con `_DEFAULTS` tras cada cambio del registro (la ola 6 lo cambia para que lea el registro).
 - Origen del patrón (retirada silenciosa de gemini-2.0-flash): L-014 en `.ag/learnings.md`.
 
 ## Evals (`evals.py`)
@@ -122,7 +137,23 @@ Cuatro piezas, cada una en su propio módulo, cero dependencias externas:
   cambios → cero LLM" (checkers de delta) y "mismo periodo → no reprocesar"
   (informes diarios idempotentes).
 
-Patrón de uso combinado en un job:
+Patrón de uso en código NUEVO (plano IA, ola 1) — `complete_for` hace el
+presupuesto, el coste y el evento por ti:
+```python
+from nickname_common.budget import BudgetGuard, BudgetExhausted
+from nickname_common.llm import complete_for, CascadeExhausted
+
+guard = BudgetGuard(store=mi_store, month_limit_micros=LIMITE_MES, per_call_limit_micros=TOPE_LLAMADA)
+try:
+    res = complete_for("clasificacion_masiva", mensajes, guard=guard, json_schema=schema)
+except BudgetExhausted as exc:
+    ...  # conservar lo determinista; exc.usage_event / exc.result si los hay
+except CascadeExhausted as exc:
+    ...  # todos los pasos fallaron; exc.usage_event (transport_error)
+guardar(res.usage_event.to_dict())
+```
+
+Patrón legado (consumidores de `complete()`), combinado a mano en un job:
 ```python
 from nickname_common.fingerprint import fingerprint, idempotency_key
 from nickname_common.budget import BudgetGuard, BudgetExhausted
@@ -159,10 +190,10 @@ guard.record_call(cost)
 | `NK_MODEL_<TIER>` | llm | defaults del registro |
 | `XAI_API_KEY` | llm.complete | no provisionada (Fase 1) |
 | `NK_XAI_LIVE` | llm.complete | off; `1` habilita HTTP live (Fase 2) |
-| `NK_ROUTER` / `OPENROUTER_API_KEY` / `NK_AGENT_NAME` | llm.complete (enrutador) | off; `openrouter` enruta |
-| `GEMINI_API_KEY` (alias `GOOGLE_AI_API_KEY`) | llm.complete (leg gemini_directo) | — (sin key, leg saltado) |
-| `OPENAI_API_KEY` / `NK_MODEL_OPENAI_FALLBACK` | llm.complete (leg openai) | — / `gpt-4o-mini` |
-| `ANTHROPIC_API_KEY` / `NK_MODEL_ANTHROPIC_FALLBACK` | llm.complete (leg anthropic) | — / `claude-haiku-4-5-20251001` |
+| `NK_ROUTER` / `OPENROUTER_API_KEY` / `NK_AGENT_NAME` | llm.complete y complete_for (enrutador; `NK_AGENT_NAME` también es el `service` del evento de uso) | off; `openrouter` enruta |
+| `GEMINI_API_KEY` (alias `GOOGLE_AI_API_KEY`) | llm.complete (leg gemini_directo) y complete_for (`gemini_direct`) | — (sin key, leg saltado) |
+| `OPENAI_API_KEY` / `NK_MODEL_OPENAI_FALLBACK` | llm.complete (leg openai) y complete_for (`openai_direct`, modelo del tier) | — / `gpt-4o-mini` |
+| `ANTHROPIC_API_KEY` / `NK_MODEL_ANTHROPIC_FALLBACK` | llm.complete (leg anthropic) y complete_for (`anthropic_direct`, solo agentes críticos de dinero por D-A) | — / `claude-haiku-4-5-20251001` |
 | `AG_DECISIONS_LOG` | activity_logger | auto-detect |
 
 ## Testing
