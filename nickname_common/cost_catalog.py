@@ -29,6 +29,14 @@ Para añadir un precio nuevo: verificarlo contra una respuesta real con
 `usage.include=True` del leg OpenRouter para ese modelo, añadir la entrada
 aquí CON la fecha/fuente de esa verificación en un comentario, y subir
 `CATALOG_VERSION`.
+
+`nickname_common.llm.complete_for` usa además este catálogo como PUERTA: con
+un `BudgetGuard`, un paso directo (Anthropic, OpenAI o Gemini por su API)
+cuyo modelo no esté aquí se salta en cerrado (`sin-precio`), porque esas
+APIs no informan coste y el guard no podría sumar la llamada. Los respaldos
+directos de Claude y GPT de la ola 1 del plano IA se activan con guard
+cuando su precio entre aquí verificado (p.ej. contra el
+`upstream_inference_cost` de una llamada BYOK real por OpenRouter).
 """
 
 from __future__ import annotations

@@ -77,7 +77,9 @@ por clase de trabajo), con presupuesto obligatorio (`BudgetGuard` o
 `complete()` se conserva tal cual para los consumidores existentes; el código
 nuevo debe usar `complete_for`. Tiers añadidos en la ola 1: `claude_opus`,
 `claude_haiku`, `gpt_quality`, `gpt_fast` y `gemini_embedding` (este último
-no enrutable, como `imagen`).
+no enrutable, como `imagen`). El guard L-014 cubre también el override de
+slug `NK_MODEL_<TIER>_SLUG` (en `router_slug`, así que complete() lo hereda).
+Este módulo importa `ai_policy` al final para validar la política al cargar.
 """
 
 from __future__ import annotations
@@ -94,7 +96,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
 from nickname_common.budget import BudgetExhausted, BudgetGuard
-from nickname_common.cost_catalog import estimate_cost_micros
+from nickname_common.cost_catalog import estimate_cost_micros, known_models
 from nickname_common.models.llm_usage import CostSource, LLMOutcome, LLMUsageEventV1
 
 # Logger de módulo (stdlib): anomalías de config y fallos de leg de la cascada.
@@ -186,6 +188,15 @@ _ROUTER_SLUGS = {
     "gpt_fast": "openai/gpt-5.4-mini",
     "grok_fast": "x-ai/grok-4.3",
     "grok_quality": "x-ai/grok-4.7",
+}
+
+# Prefijo de proveedor de los slugs de OpenRouter por familia (provider_of).
+# El guard L-014 lo exige también al override NK_MODEL_<TIER>_SLUG.
+_SLUG_PROVIDER_PREFIX = {
+    "gemini": "google/",
+    "anthropic": "anthropic/",
+    "openai": "openai/",
+    "xai": "x-ai/",
 }
 
 # Tiers que NO pueden pasar por el enrutador. No es pereza: OpenRouter es un
@@ -454,7 +465,12 @@ def router_enabled() -> bool:
 
 
 def router_slug(tier: str) -> str:
-    """Slug de OpenRouter para el tier. Conserva familia y modelo."""
+    """Slug de OpenRouter para el tier. Conserva familia y modelo.
+
+    El override `NK_MODEL_<TIER>_SLUG` pasa el mismo guard L-014 que
+    `NK_MODEL_<TIER>`: un slug de otro proveedor o de otra familia lanza
+    `CrossProviderOverrideError` (no cruzar de familia con un override).
+    """
     if tier not in _DEFAULTS:
         raise KeyError(f"Tier de modelo desconocido: {tier!r}")
     if tier in _ROUTER_UNSUPPORTED:
@@ -463,6 +479,7 @@ def router_slug(tier: str) -> str:
             "paridad de embeddings ni de generacion de imagen. Sigue yendo directo."
         )
     slug = os.getenv(ENV_PREFIX + tier.upper() + "_SLUG", _ROUTER_SLUGS[tier])
+    _assert_slug_family(tier, slug)
     return slug
 
 
@@ -721,20 +738,36 @@ def complete_for(
     """Completa un chat según la política de la CLASE de trabajo.
 
     La clase (`nickname_common.ai_policy`, fuente canónica) fija la cadena
-    ordenada de pasos `{tier, via}`. Se recorre en orden:
+    ordenada de pasos `{tier, via}`. Antes de tocar red o presupuesto se
+    resuelve el modelo de TODOS los pasos: un override roto (`NK_MODEL_<TIER>`
+    o `NK_MODEL_<TIER>_SLUG` que cruza de familia) es config, no transporte, y
+    revienta sin encadenar. Después se recorre la cadena en orden:
 
     - Paso `@openrouter`: solo si `NK_ROUTER=openrouter` (router_enabled()) Y
       hay `OPENROUTER_API_KEY`. Quitar `NK_ROUTER` sigue siendo la palanca de
       rollback: el servicio deja de salir por OpenRouter sin deploy.
     - Pasos directos (`anthropic_direct`, `openai_direct`, `gemini_direct`):
-      solo si existe su clave. Por la decisión D-A, la clave Anthropic directa
-      solo vive en los agentes críticos de dinero; en los demás ese paso se
-      salta y queda en la lista de intentos.
+      solo si existe su clave. `anthropic_direct` exige además la
+      autorización D-A (`ai_policy.ANTHROPIC_DIRECT_AUTHORIZED`, por
+      `NK_AGENT_NAME` y, en odoo-agent, por `job_id` `cfo...`): la clave sola
+      no basta (motivo `no-autorizado-D-A`).
+    - Con `guard`, un paso directo cuyo modelo no tiene precio verificado en
+      `cost_catalog` se salta en cerrado (motivo `sin-precio`): Anthropic y
+      OpenAI directos no informan coste, y sin precio el guard no podría
+      sumar la llamada. Con `budget_exempt` la exención es explícita y el
+      paso se ejecuta. Los pasos de OpenRouter traen el coste en la respuesta.
     - Solo los fallos de TRANSPORTE encadenan (HTTP >=400, red, timeout). Un
-      200 con JSON de contenido inválido se devuelve (`parsed_json=None`) y
-      NO se relitiga en el paso siguiente.
+      200 con JSON de contenido inválido se devuelve (`parsed_json=None`,
+      evento `content_error`) y NO se relitiga en el paso siguiente.
+    - Fallo de PUERTA (red, timeout, HTTP 401 o 402: la clave o el host, no el
+      modelo): el resto de pasos de esa misma vía se saltan (`puerta-caida`)
+      en vez de repetir un intento que fallaría igual. Un 402 de OpenRouter
+      (tope diario de la clave agotado) sigue encadenando, como fija el
+      despliegue de flota del 2026-08-31, pero los pasos directos siguientes
+      quedan acotados por el guard (precio verificado o `sin-precio`).
     - Todo agotado → `CascadeExhausted` con la cadena de intentos (vía, tier,
-      motivo), nunca contenido.
+      motivo), nunca contenido; su evento es `timeout` si todos los intentos
+      de red fueron timeouts y `transport_error` en cualquier otro caso.
 
     Presupuesto OBLIGATORIO: `guard` es un `BudgetGuard`; con `guard=None`
     hay que declarar `budget_exempt="<motivo>"` (si no, ValueError). Con
@@ -746,13 +779,16 @@ def complete_for(
     respuesta en `exc.result` y el evento en `exc.usage_event`, para que el
     consumidor lo trate como anomalía sin perder lo pagado.
 
-    Coste: el que informa el proveedor (OpenRouter `usage.cost`; con BYOK el
-    gasto real del modelo puede viajar aparte en
-    `cost_details.upstream_inference_cost` y se toma el mayor de los dos para
-    no infravalorar ni contar dos veces) → si no hay, el catálogo verificado
-    (`cost_catalog`) → si tampoco, `None` (`cost_source=unavailable`, nunca 0).
+    Coste: el que informa OpenRouter (`usage.cost`; con BYOK, `is_byok=true`,
+    ese campo es solo la comisión de OpenRouter y el proveedor factura aparte
+    `cost_details.upstream_inference_cost`, así que el gasto es la SUMA; sin
+    BYOK se toma `cost`) → si no hay, el catálogo verificado (`cost_catalog`,
+    contando como salida los tokens de razonamiento de Gemini, que Google
+    cobra a precio de salida) → si tampoco, `None` (`cost_source=unavailable`,
+    nunca 0, y aviso en el log si había guard).
 
-    El resultado lleva `usage_event` (LLMUsageEventV1, sin PII ni prompt).
+    El resultado lleva `usage_event` (LLMUsageEventV1, sin PII ni prompt;
+    `output_tokens` son los facturados, razonamiento incluido).
     `LLMResult.provider` etiqueta el paso real: `openrouter:anthropic`,
     `openrouter:openai`, `openrouter:google`, `anthropic-direct`,
     `openai-direct` o `google-direct`.
@@ -763,6 +799,7 @@ def complete_for(
     """
     exempt = _validated_budget_args(guard, budget_exempt)
     steps = _api_steps_for(clase)
+    requested = [_step_requested_model(step) for step in steps]
     event_base = {
         "service": (
             service
@@ -774,102 +811,169 @@ def complete_for(
         "reason": (reason or f"clase:{clase}")
         + (f";budget_exempt:{exempt}" if exempt else ""),
     }
+    # Identidad del DESPLIEGUE para la autorización D-A: la variable de entorno
+    # del servicio, no el kwarg `service` (que solo etiqueta el evento).
+    agent = os.getenv(ROUTER_AGENT_ENV, "").strip()
 
     if guard is not None:
         try:
             guard.check_before_call()
         except BudgetExhausted as exc:
             exc.usage_event = LLMUsageEventV1.budget_blocked(
-                requested_model=_step_requested_model(steps[0]), **event_base
+                requested_model=requested[0], **event_base
             )
             raise
 
     post = http_post if http_post is not None else _urllib_post
     intentos: list[str] = []
-    for step in steps:
+    fallos_de_red: list[Exception] = []
+    puertas_caidas: set[str] = set()
+    for step, model in zip(steps, requested):
         tier, via = step.tier, step.via
         if via == "openrouter":
-            slug = router_slug(tier)
-            label = f"openrouter:{slug.split('/', 1)[0]}"
-            if not router_enabled():
-                intentos.append(f"{label}[{tier}](router-apagado)")
-                continue
-            if not os.getenv(ROUTER_KEY_ENV, "").strip():
-                _LOG.warning(
-                    "%s=openrouter pero falta %s: anomalía de config; complete_for "
-                    "salta el paso %s[%s]", ROUTER_ENV, ROUTER_KEY_ENV, label, tier,
-                )
-                intentos.append(f"{label}[{tier}](sin-credencial)")
-                continue
-
-            def call(slug=slug, label=label):
-                return _leg_openrouter(
-                    slug, label, messages, json_schema, max_tokens, temperature,
-                    post, timeout, track_upstream_cost=True,
-                )
-        elif via == "anthropic_direct":
+            label = f"openrouter:{model.split('/', 1)[0]}"
+        else:
             label = _DIRECT_VIA_LABELS[via]
-            if not os.getenv(ANTHROPIC_KEY_ENV, "").strip():
-                intentos.append(f"{label}[{tier}](sin-credencial)")
-                continue
-
-            def call(tier=tier, label=label):
-                return _leg_anthropic(
-                    messages, json_schema, max_tokens, temperature, post, timeout,
-                    model=get_model(tier), provider_label=label, native_schema=True,
-                )
-        elif via == "openai_direct":
-            label = _DIRECT_VIA_LABELS[via]
-            if not os.getenv(OPENAI_KEY_ENV, "").strip():
-                intentos.append(f"{label}[{tier}](sin-credencial)")
-                continue
-
-            def call(tier=tier, label=label):
-                return _leg_openai(
-                    messages, json_schema, max_tokens, temperature, post, timeout,
-                    model=get_model(tier), provider_label=label,
-                    token_param="max_completion_tokens",
-                )
-        elif via == "gemini_direct":
-            label = _DIRECT_VIA_LABELS[via]
-            if not _gemini_direct_key():
-                intentos.append(f"{label}[{tier}](sin-credencial)")
-                continue
-
-            def call(tier=tier):
-                return _leg_gemini_direct(
-                    tier, messages, json_schema, max_tokens, temperature, post,
-                    timeout,
-                )
-        else:  # pragma: no cover — ai_policy valida las vías al importarse
-            raise ValueError(f"Vía desconocida en la política: {via!r}")
-
+        skip = _step_skip_reason(
+            via, tier, model, label,
+            guard=guard, agent=agent, job_id=event_base["job_id"],
+            puertas_caidas=puertas_caidas,
+        )
+        if skip is not None:
+            intentos.append(f"{label}[{tier}]({skip})")
+            continue
         try:
-            result = call()
+            result = _run_step(
+                via, tier, model, label, messages, json_schema, max_tokens,
+                temperature, post, timeout,
+            )
         except _TRANSPORT_ERRORS as exc:
             motivo = (
                 exc.reason if isinstance(exc, _TransportFailure) else type(exc).__name__
             )
             intentos.append(f"{label}[{tier}]({motivo})")
+            fallos_de_red.append(exc)
+            if _is_door_failure(exc):
+                puertas_caidas.add(via)
             _LOG.warning(
                 "complete_for clase=%s: paso %s[%s] falló (%s); se intenta el siguiente",
                 clase, label, tier, motivo,
             )
             continue
-        return _settle_result(result, guard=guard, event_base=event_base)
+        return _settle_result(
+            result, guard=guard, event_base=event_base, json_schema=json_schema
+        )
 
     exhausted = CascadeExhausted(
         f"Cadena API agotada para la clase {clase!r}. "
         "Intentos (vía[tier](motivo)): " + " -> ".join(intentos)
     )
+    todo_timeout = bool(fallos_de_red) and all(_is_timeout(e) for e in fallos_de_red)
     exhausted.usage_event = LLMUsageEventV1(
         provider="none",
-        requested_model=_step_requested_model(steps[0]),
-        outcome=LLMOutcome.TRANSPORT_ERROR,
+        requested_model=requested[0],
+        outcome=LLMOutcome.TIMEOUT if todo_timeout else LLMOutcome.TRANSPORT_ERROR,
         cost_source=CostSource.UNAVAILABLE,
         **event_base,
     )
     raise exhausted
+
+
+def _step_skip_reason(
+    via: str,
+    tier: str,
+    model: str,
+    label: str,
+    *,
+    guard: BudgetGuard | None,
+    agent: str,
+    job_id: str,
+    puertas_caidas: set[str],
+) -> str | None:
+    """Motivo para saltar el paso sin tocar la red, o None si se intenta."""
+    if via in puertas_caidas:
+        return "puerta-caida"
+    if via == "openrouter":
+        if not router_enabled():
+            return "router-apagado"
+        if not os.getenv(ROUTER_KEY_ENV, "").strip():
+            _LOG.warning(
+                "%s=openrouter pero falta %s: anomalía de config; complete_for "
+                "salta el paso %s[%s]", ROUTER_ENV, ROUTER_KEY_ENV, label, tier,
+            )
+            return "sin-credencial"
+        return None
+    if via == "anthropic_direct":
+        if not os.getenv(ANTHROPIC_KEY_ENV, "").strip():
+            return "sin-credencial"
+        if not _ai_policy.anthropic_direct_allowed(agent, job_id):
+            return "no-autorizado-D-A"
+    elif via == "openai_direct":
+        if not os.getenv(OPENAI_KEY_ENV, "").strip():
+            return "sin-credencial"
+    elif via == "gemini_direct":
+        if not _gemini_direct_key():
+            return "sin-credencial"
+    else:  # pragma: no cover — ai_policy valida las vías al importarse
+        raise ValueError(f"Vía desconocida en la política: {via!r}")
+    # Fail-closed (budget.py: «ausencia de certeza de gasto bloquea»): un paso
+    # directo no trae coste en la respuesta; sin precio verificado el guard no
+    # podría sumarlo y quedaría inerte justo cuando OpenRouter ha caído.
+    if guard is not None and model not in known_models():
+        return "sin-precio"
+    return None
+
+
+def _run_step(
+    via: str,
+    tier: str,
+    model: str,
+    label: str,
+    messages: list[Mapping[str, str]],
+    json_schema: dict[str, Any] | None,
+    max_tokens: int,
+    temperature: float | None,
+    post: HttpPost,
+    timeout: float,
+) -> LLMResult:
+    """Ejecuta un paso de la cadena con el leg de su vía."""
+    if via == "openrouter":
+        return _leg_openrouter(
+            model, label, messages, json_schema, max_tokens, temperature,
+            post, timeout, track_upstream_cost=True,
+        )
+    if via == "anthropic_direct":
+        return _leg_anthropic(
+            messages, json_schema, max_tokens, temperature, post, timeout,
+            model=model, provider_label=label, native_schema=True,
+        )
+    if via == "openai_direct":
+        return _leg_openai(
+            messages, json_schema, max_tokens, temperature, post, timeout,
+            model=model, provider_label=label,
+            token_param="max_completion_tokens",
+        )
+    if via == "gemini_direct":
+        return _leg_gemini_direct(
+            tier, messages, json_schema, max_tokens, temperature, post, timeout,
+            track_reasoning_tokens=True,
+        )
+    raise ValueError(f"Vía desconocida en la política: {via!r}")  # pragma: no cover
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    return isinstance(exc, urllib.error.URLError) and isinstance(
+        getattr(exc, "reason", None), TimeoutError
+    )
+
+
+def _is_door_failure(exc: BaseException) -> bool:
+    """¿Falla la PUERTA (clave o host) y no el modelo? Red, timeout, 401, 402."""
+    if isinstance(exc, _TransportFailure):
+        return exc.http_status in (401, 402)
+    return isinstance(exc, OSError)
 
 
 def _validated_budget_args(
@@ -897,10 +1001,7 @@ def _validated_budget_args(
 
 def _api_steps_for(clase: str) -> tuple:
     """Cadena API ejecutable de la clase, o ClassNotApiExecutable."""
-    # Import diferido: ai_policy importa este módulo para validar sus tiers.
-    from nickname_common import ai_policy
-
-    steps = ai_policy.api_chain(clase)
+    steps = _ai_policy.api_chain(clase)
     if not steps:
         raise ClassNotApiExecutable(
             f"La clase {clase!r} es del carril suscripción y no declara cadena API: "
@@ -923,21 +1024,51 @@ def _step_requested_model(step) -> str:
     return get_model(step.tier)
 
 
+def _billed_output_tokens(usage: Mapping[str, int]) -> int | None:
+    """Tokens de salida FACTURADOS: texto + razonamiento.
+
+    OpenRouter, OpenAI y Anthropic ya incluyen el razonamiento en su recuento
+    de salida; Gemini directo lo informa aparte (`thoughtsTokenCount`, que el
+    leg guarda como `reasoning_tokens` solo para complete_for) y Google lo
+    cobra a precio de salida. Sin ninguno de los dos recuentos: None.
+    """
+    completion = usage.get("completion_tokens")
+    reasoning = usage.get("reasoning_tokens")
+    if completion is None and reasoning is None:
+        return None
+    return (completion or 0) + (reasoning or 0)
+
+
 def _result_cost(result: LLMResult) -> tuple[int | None, CostSource]:
     usage = result.usage
-    reported = [
-        usage[k] for k in ("cost_micros", "upstream_cost_micros") if usage.get(k) is not None
-    ]
-    if reported:
-        # BYOK: `cost` puede ser solo la comisión y el gasto real del modelo
-        # viajar en upstream; sin BYOK upstream falta o coincide. El mayor de
-        # los dos no infravalora ni cuenta dos veces.
-        return max(reported), CostSource.PROVIDER_RESPONSE
+    cost = usage.get("cost_micros")
+    upstream = usage.get("upstream_cost_micros")
+    if cost is not None or upstream is not None:
+        byok = usage.get("is_byok")
+        if byok == 1 and upstream is not None:
+            # BYOK: `cost` es la comisión de OpenRouter (en sus créditos) y
+            # upstream lo que factura el proveedor (crédito Team en D-A): el
+            # gasto real es la suma de los dos.
+            total = upstream if cost is None else cost + upstream
+        elif byok == 0:
+            # Sin BYOK, upstream repite el mismo importe (o viene a 0/null):
+            # sumarlo contaría dos veces. Recibo: docs/evidence/flash-lite-cost-20260913.json.
+            total = cost if cost is not None else upstream
+        else:
+            if byok == 1:
+                _LOG.warning(
+                    "OpenRouter marcó BYOK sin cost_details.upstream_inference_cost: "
+                    "solo se conoce la comisión; el gasto del proveedor queda sin sumar"
+                )
+            # Sin la marca is_byok no se sabe si upstream repite el importe: el
+            # mayor de los dos nunca cuenta dos veces.
+            total = max(v for v in (cost, upstream) if v is not None)
+        return total, CostSource.PROVIDER_RESPONSE
     # Catálogo: ids sin prefijo de OpenRouter (precio pass-through idéntico).
     estimated = estimate_cost_micros(
         result.model.split("/", 1)[-1],
         input_tokens=usage.get("prompt_tokens"),
-        output_tokens=usage.get("completion_tokens"),
+        output_tokens=_billed_output_tokens(usage),
     )
     if estimated is not None:
         return estimated, CostSource.CATALOG
@@ -945,15 +1076,32 @@ def _result_cost(result: LLMResult) -> tuple[int | None, CostSource]:
 
 
 def _settle_result(
-    result: LLMResult, *, guard: BudgetGuard | None, event_base: dict[str, str]
+    result: LLMResult,
+    *,
+    guard: BudgetGuard | None,
+    event_base: dict[str, str],
+    json_schema: dict[str, Any] | None,
 ) -> LLMResult:
     cost, source = _result_cost(result)
+    if cost is None and guard is not None:
+        _LOG.warning(
+            "complete_for: %s sirvió %s sin coste en la respuesta ni precio de "
+            "catálogo; el BudgetGuard no puede sumar esta llamada (anomalía)",
+            result.provider, result.model,
+        )
+    # Un 200 que no da el JSON pedido (inválido o cortado por max_tokens) se
+    # pagó pero no sirve al consumidor: content_error, sin encadenar.
+    outcome = (
+        LLMOutcome.CONTENT_ERROR
+        if json_schema is not None and result.parsed_json is None
+        else LLMOutcome.SERVED
+    )
     event = LLMUsageEventV1(
         provider=result.provider,
         requested_model=result.model,
-        outcome=LLMOutcome.SERVED,
+        outcome=outcome,
         input_tokens=result.usage.get("prompt_tokens"),
-        output_tokens=result.usage.get("completion_tokens"),
+        output_tokens=_billed_output_tokens(result.usage),
         cost_micros=cost,
         cost_source=source,
         **event_base,
@@ -1034,10 +1182,10 @@ def _leg_openrouter(
 
     `track_upstream_cost=True` (solo complete_for) añade a `usage` la clave
     `upstream_cost_micros` cuando OpenRouter informa
-    `usage.cost_details.upstream_inference_cost`: con BYOK (decisión D-A, el
-    crédito Team de Anthropic) `cost` puede ser solo la comisión de OpenRouter
-    y el gasto real del modelo viaja en ese campo. complete() no lo pide, así
-    que su `usage` no cambia.
+    `usage.cost_details.upstream_inference_cost`, y `is_byok` (1/0) cuando
+    informa `usage.is_byok`: con BYOK (decisión D-A, el crédito Team de
+    Anthropic) `cost` es solo la comisión de OpenRouter y el gasto del modelo
+    viaja en upstream. complete() no lo pide, así que su `usage` no cambia.
     """
     key = os.getenv(ROUTER_KEY_ENV, "").strip()
     body: dict[str, Any] = {
@@ -1068,6 +1216,8 @@ def _leg_openrouter(
         upstream = details.get("upstream_inference_cost") if isinstance(details, dict) else None
         if upstream is not None:
             usage["upstream_cost_micros"] = _usd_to_micros(upstream)
+        if isinstance(usage_raw.get("is_byok"), bool):
+            usage["is_byok"] = int(usage_raw["is_byok"])
     return LLMResult(
         text=text,
         parsed_json=_parse_json_text(text, json_schema),
@@ -1137,8 +1287,16 @@ def _leg_gemini_direct(
     temperature: float | None,
     post: HttpPost,
     timeout: float,
+    *,
+    track_reasoning_tokens: bool = False,
 ) -> LLMResult:
-    """Leg Gemini REST v1beta del tier. `temperature=None` no la envía."""
+    """Leg Gemini REST v1beta del tier. `temperature=None` no la envía.
+
+    `track_reasoning_tokens=True` (solo complete_for) añade a `usage` la clave
+    `reasoning_tokens` con `usageMetadata.thoughtsTokenCount`: Google cobra
+    el razonamiento a precio de salida y `candidatesTokenCount` no lo
+    incluye. complete() no lo pide, así que su `usage` no cambia.
+    """
     model = get_model(tier)
     url = GEMINI_GENERATE_URL.format(model=model) + f"?key={_gemini_direct_key()}"
     contents, system_parts = _gemini_contents(messages)
@@ -1179,6 +1337,8 @@ def _leg_gemini_direct(
     ):
         if src in meta:
             usage[dst] = int(meta[src])
+    if track_reasoning_tokens and "thoughtsTokenCount" in meta:
+        usage["reasoning_tokens"] = int(meta["thoughtsTokenCount"])
     return LLMResult(
         text=text,
         parsed_json=_parse_json_text(text, json_schema),
@@ -1344,6 +1504,18 @@ def _assert_model_family(tier: str, model: str) -> None:
     )
 
 
+def _assert_slug_family(tier: str, slug: str) -> None:
+    provider_prefix = _SLUG_PROVIDER_PREFIX[provider_of(tier)]
+    prefixes = _FAMILY_PREFIXES[tier]
+    if slug.startswith(provider_prefix) and slug[len(provider_prefix):].startswith(prefixes):
+        return
+    raise CrossProviderOverrideError(
+        f"NK_MODEL_{tier.upper()}_SLUG={slug!r} no pertenece a la familia "
+        f"{provider_prefix}{{{','.join(prefixes)}}}* (guard L-014: el slug de "
+        "OpenRouter tampoco cruza proveedores con un override de emergencia)"
+    )
+
+
 def _urllib_post(
     url: str, headers: Mapping[str, str], body: dict, timeout: float
 ) -> tuple[int, str]:
@@ -1358,3 +1530,10 @@ def _urllib_post(
             return resp.status, resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", errors="replace")[:200]
+
+
+# Al final a propósito: ai_policy importa este módulo para validar sus tiers.
+# Importarla aquí valida la política al cargar `nickname_common.llm`: una
+# política incoherente rompe el arranque del servicio, no la primera llamada
+# a complete_for (SPEC-AI-PLANE-20261017 §5.4).
+from nickname_common import ai_policy as _ai_policy  # noqa: E402

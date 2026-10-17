@@ -17,8 +17,24 @@ SPEC-AI-PLANE-20261017 §4 (ola 1), decisiones de Diego del 2026-10-17:
   directa como respaldo solo en los agentes críticos de dinero
   (nickname-recobro-agent, nickname-facturas-agent y los jobs CFO de
   nickname-odoo-agent). En código eso es el paso
-  `claude_sonnet@anthropic_direct`: existe en la política de todos, pero solo
-  se ejecuta donde está `ANTHROPIC_API_KEY`; en los demás se salta.
+  `claude_sonnet@anthropic_direct` más la lista `ANTHROPIC_DIRECT_AUTHORIZED`:
+  el paso solo se ejecuta si existe `ANTHROPIC_API_KEY` Y el servicio
+  (`NK_AGENT_NAME`, y en odoo-agent también el `job_id`) está autorizado. La
+  clave sola no basta: la misma clave compartida existe en otros servicios
+  (ver `.ag/api/credentials_map.md`), y en ellos el paso se salta.
+
+Los dos papeles de OpenRouter en las cadenas (D2 + D-A):
+
+- `claude_*@openrouter` es la vía NORMAL de Claude: el BYOK la factura a la
+  organización de Anthropic y la absorbe el crédito Team (coste marginal
+  cero). Por eso va primero en las clases de cliente/dinero.
+- `gemini_*@openrouter` y `gpt_*@openrouter` son el ÚLTIMO RECURSO medido de
+  D2 («OpenRouter cuando todo lo demás falla»): Gemini y GPT no tienen
+  crédito, así que la vía directa del mismo tier va antes y OpenRouter
+  queda detrás de todo lo demás (SPEC §4, columna «Último recurso»). La
+  vía directa no queda sin control de gasto: `complete_for` exige
+  `BudgetGuard` y salta en cerrado cualquier paso directo sin precio
+  verificado en `nickname_common.cost_catalog`.
 
 Por qué vive aquí y no en un YAML de `nickname-apps-config`: los servicios de
 Railway no tienen ese repo, y este paquete sí viaja con cada agente. Solo
@@ -26,8 +42,9 @@ stdlib, como el resto del paquete. Si en el futuro se exporta a YAML para el
 broker o el Command Center, el YAML se GENERA desde aquí (`as_dict()`), no al
 revés.
 
-Reglas de forma (se validan al importar el módulo — un error aquí rompe el
-arranque del servicio, no la primera llamada):
+Reglas de forma (se validan al importar el módulo, y `nickname_common.llm`
+lo importa al cargarse: un error aquí rompe el arranque del servicio, no la
+primera llamada a `complete_for`):
 
 - Los nombres de modelo NUNCA aparecen aquí: la política habla de tiers del
   registro (`nickname_common.llm`).
@@ -44,10 +61,12 @@ arranque del servicio, no la primera llamada):
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Mapping
 
 from nickname_common import llm
 
-POLICY_VERSION = "2026-10-17.1"
+POLICY_VERSION = "2026-10-17.2"
 
 LANES = ("api", "subscription")
 VIAS = ("openrouter", "anthropic_direct", "openai_direct", "gemini_direct")
@@ -62,13 +81,35 @@ _DIRECT_VIA_PROVIDER = {
 
 # Reglas que aplica el broker de suscripciones (ola 4). Aquí solo se declaran.
 RULE_DIFFERENT_FAMILY_FROM_AUTHOR = "familia_distinta_al_autor"
+RULE_OPENROUTER_LAST_RESORT_QUOTA = "openrouter_ultimo_recurso_cuota_agotada"
 BROKER_RULES = {
     RULE_DIFFERENT_FAMILY_FROM_AUTHOR: (
         "El revisor debe ser de una familia distinta a la del autor del cambio: "
         "el broker descarta de la cadena el CLI de la misma familia que el autor "
         "y usa el siguiente. Grok queda como tercera opinión."
     ),
+    RULE_OPENROUTER_LAST_RESORT_QUOTA: (
+        "OpenRouter es el último recurso de la clase, fuera de su cadena API: "
+        "solo cuando todas las cuentas candidatas del pool estén enfriadas con "
+        "evidencia explícita de cuota agotada y el flag nominal "
+        "ENGINEERING_OPENROUTER_FALLBACK_ENABLED esté activo. Falta de login, "
+        "host caído, timeout o error de red no acreditan cuota agotada. Regla "
+        "vigente de docs/SUBSCRIPTION-EXECUTORS.md (nickname-apps-config) "
+        "llevada al pool (SPEC-AI-PLANE-20261017 §4 y §6)."
+    ),
 }
+
+# D-A: servicios autorizados a usar la vía `anthropic_direct` (respaldo con la
+# clave Anthropic directa cuando OpenRouter cae). Clave: `NK_AGENT_NAME` del
+# despliegue. Valor: None = todo el servicio; tupla = solo los `job_id` que
+# empiecen por alguno de esos prefijos (en odoo-agent, únicamente los jobs
+# CFO, que se identifican con un job_id `cfo...`). Sin entrada aquí, el paso
+# se salta aunque el servicio tenga ANTHROPIC_API_KEY.
+ANTHROPIC_DIRECT_AUTHORIZED: Mapping[str, tuple[str, ...] | None] = MappingProxyType({
+    "nickname-recobro-agent": None,
+    "nickname-facturas-agent": None,
+    "nickname-odoo-agent": ("cfo",),
+})
 
 
 class PolicyError(ValueError):
@@ -138,15 +179,15 @@ def _subs(*clis: str | tuple[str, str]) -> tuple[SubscriptionStep, ...]:
     )
 
 
-# Cadena de cliente/dinero (D2 + D-A): Claude Sonnet por OpenRouter con BYOK
-# (lo absorbe el crédito Team) → Claude Sonnet con clave directa (solo en los
-# agentes críticos que la tienen) → GPT de gama alta por OpenRouter → GPT
-# directo.
+# Cadena de cliente/dinero (D2 + D-A, SPEC §4): Claude Sonnet por OpenRouter
+# con BYOK (lo absorbe el crédito Team) → Claude Sonnet con clave directa
+# (solo en los agentes críticos autorizados por D-A) → GPT de gama alta
+# directo → GPT de gama alta por OpenRouter, último recurso medido (D2).
 _CLIENTE_DINERO_API = _api(
     "claude_sonnet@openrouter",
     "claude_sonnet@anthropic_direct",
-    "gpt_quality@openrouter",
     "gpt_quality@openai_direct",
+    "gpt_quality@openrouter",
 )
 
 _POLICY: dict[str, ClassPolicy] = {
@@ -157,14 +198,16 @@ _POLICY: dict[str, ClassPolicy] = {
             lane="api",
             description=(
                 "Triaje de alto volumen sin redacción de cara al cliente "
-                "(management-gmail, EmilIA, tickets, feedback). Única clase "
-                "donde Gemini es primario (D2)."
+                "(management-gmail, EmilIA, tickets, feedback). Única clase de "
+                "chat por API con Gemini como primario (D2); Gemini también es "
+                "primario en contexto_largo, embeddings e imagen. Flash-Lite, "
+                "después Flash y OpenRouter como último recurso (SPEC §4)."
             ),
             api_chain=_api(
-                "gemini_flash_lite@openrouter",
                 "gemini_flash_lite@gemini_direct",
-                "gemini_flash@openrouter",
                 "gemini_flash@gemini_direct",
+                "gemini_flash_lite@openrouter",
+                "gemini_flash@openrouter",
             ),
         ),
         ClassPolicy(
@@ -191,8 +234,12 @@ _POLICY: dict[str, ClassPolicy] = {
         ClassPolicy(
             clase="codigo",
             lane="subscription",
-            description="Handoffs, Review Fixer como autor y Symphony.",
+            description=(
+                "Handoffs, Review Fixer como autor y Symphony. Sin cadena API: "
+                "OpenRouter solo con cuota agotada (regla del broker)."
+            ),
             subscription_chain=_subs("claude", "codex", "grok"),
+            broker_rules=(RULE_OPENROUTER_LAST_RESORT_QUOTA,),
         ),
         ClassPolicy(
             clase="revision",
@@ -213,12 +260,14 @@ _POLICY: dict[str, ClassPolicy] = {
             lane="subscription",
             description=(
                 "Auditorías documentales, destilado de Obsidian y Drive. Gemini "
-                "CLI (Ultra) primario; por API, Gemini Pro y después Claude."
+                "CLI (Ultra) primario; por API, Gemini Pro directo, después "
+                "Claude (BYOK, crédito Team) y OpenRouter como último recurso "
+                "(SPEC §4)."
             ),
             api_chain=_api(
-                "gemini_pro@openrouter",
                 "gemini_pro@gemini_direct",
                 "claude_sonnet@openrouter",
+                "gemini_pro@openrouter",
             ),
             subscription_chain=_subs("gemini", "claude"),
         ),
@@ -275,12 +324,47 @@ def subscription_chain(clase: str) -> tuple[SubscriptionStep, ...]:
     return policy_for(clase).subscription_chain
 
 
+def anthropic_direct_allowed(service: str | None, job_id: str | None) -> bool:
+    """¿Puede este servicio (y este job) usar la vía `anthropic_direct`? (D-A)
+
+    `service` es la identidad del despliegue (`NK_AGENT_NAME`). Un servicio
+    fuera de `ANTHROPIC_DIRECT_AUTHORIZED` nunca la usa, tenga o no la clave.
+    """
+    if not service or service not in ANTHROPIC_DIRECT_AUTHORIZED:
+        return False
+    prefixes = ANTHROPIC_DIRECT_AUTHORIZED[service]
+    if prefixes is None:
+        return True
+    return bool(job_id) and job_id.startswith(prefixes)
+
+
 def as_dict() -> dict:
     """La política entera serializable (para exportarla, nunca para editarla)."""
     return {
         "policy_version": POLICY_VERSION,
         "classes": {name: p.as_dict() for name, p in _POLICY.items()},
+        "broker_rules": dict(BROKER_RULES),
+        "anthropic_direct_authorized": {
+            svc: (list(scope) if scope is not None else None)
+            for svc, scope in ANTHROPIC_DIRECT_AUTHORIZED.items()
+        },
     }
+
+
+def validate_anthropic_direct(authorized: Mapping[str, tuple[str, ...] | None]) -> None:
+    """Comprueba la forma de la lista D-A (servicio → None o prefijos de job)."""
+    for service, scope in authorized.items():
+        if not isinstance(service, str) or not service.strip():
+            raise PolicyError(f"D-A: servicio inválido {service!r}")
+        if scope is None:
+            continue
+        if not isinstance(scope, tuple) or not scope or not all(
+            isinstance(p, str) and p.strip() for p in scope
+        ):
+            raise PolicyError(
+                f"D-A: {service}: el alcance debe ser None o una tupla de prefijos "
+                f"de job_id no vacíos, no {scope!r}"
+            )
 
 
 def validate(policy: dict[str, ClassPolicy] | None = None) -> None:
@@ -329,3 +413,4 @@ def validate(policy: dict[str, ClassPolicy] | None = None) -> None:
 
 
 validate()
+validate_anthropic_direct(ANTHROPIC_DIRECT_AUTHORIZED)

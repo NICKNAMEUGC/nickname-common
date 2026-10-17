@@ -156,6 +156,31 @@ def test_guard_l014_en_tiers_nuevos_y_reparados(monkeypatch, tier, mismo, cruce)
         llm.get_model(tier)
 
 
+@pytest.mark.parametrize(
+    "tier, mismo, cruces",
+    [
+        ("gemini_flash", "google/gemini-3-flash",
+         ["openai/gpt-6-astra", "google/gemma-4", "gemini-3-flash"]),
+        ("claude_opus", "anthropic/claude-opus-6",
+         ["google/gemini-2.5-pro", "anthropic/gpt-6-astra"]),
+        ("gpt_fast", "openai/gpt-6-mini",
+         ["x-ai/grok-4.3", "openai/o5-mini"]),
+        ("grok_quality", "x-ai/grok-5",
+         ["anthropic/claude-sonnet-5.5", "x-ai/gpt-6-astra"]),
+    ],
+)
+def test_guard_l014_tambien_en_el_override_de_slug(monkeypatch, tier, mismo, cruces):
+    """NK_MODEL_<TIER>_SLUG no puede cruzar de proveedor ni de familia: el
+    prefijo de OpenRouter y el nombre del modelo deben ser de la familia."""
+    var = llm.ENV_PREFIX + tier.upper() + "_SLUG"
+    monkeypatch.setenv(var, mismo)
+    assert llm.router_slug(tier) == mismo
+    for cruce in cruces:
+        monkeypatch.setenv(var, cruce)
+        with pytest.raises(CrossProviderOverrideError, match="familia"):
+            llm.router_slug(tier)
+
+
 def test_embedding_no_admite_un_modelo_de_chat_de_otra_familia(monkeypatch):
     """`text-embedding-*` es también el nombre de OpenAI: no entra en la familia."""
     monkeypatch.setenv("NK_MODEL_GEMINI_EMBEDDING", "text-embedding-004")
