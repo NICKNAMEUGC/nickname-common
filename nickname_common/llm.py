@@ -56,7 +56,8 @@ GOTCHA (verificado 2026-06-12 en 2.5 y 2026-10-18 en 3.x): los Pro solo
 funcionan en modo thinking (400 "Budget 0 is invalid"). Y Gemini 3.x no es
 homogéneo (D-F, 2026-10-18): gemini-3.5-flash-lite rechaza thinkingBudget=0
 y quiere thinkingLevel=minimal; gemini-3.8-flash acepta thinkingBudget=0 y
-rechaza minimal. `gemini_config_*(model=...)` y el leg directo lo resuelven
+rechaza minimal; gemini-4-argon (gemini_pro desde el 2026-10-18, D-F bis)
+acepta thinkingBudget=0 y rechaza minimal. `gemini_config_*(model=...)` y el leg directo lo resuelven
 por modelo (`_GEMINI_MIN_THINKING`). En OpenRouter el razonamiento de Gemini
 3.x es obligatorio (`reasoning.enabled=false` → 400): los tiers flash salen
 con `reasoning.effort="low"` por defecto (0 tokens de razonamiento medidos).
@@ -144,7 +145,9 @@ _DEFAULTS = {
     # Gemini
     "gemini_flash": "gemini-3.8-flash",       # clasificación, triaje, alto volumen
     "gemini_flash_lite": "gemini-3.5-flash-lite",  # jobs Railway de bajo coste (SPEC-RAILWAY-AUTOMATION-MIGRATION-20260911): clasificación de un delta acotado, resumen pequeño de comentarios anonimizados. NUNCA redacción que deba superar un eval de calidad — para eso gemini_flash.
-    "gemini_pro": "gemini-3.1-pro-preview",   # redacción de calidad (drafts voice-cloned)
+    # D-F bis (Diego, 2026-10-18): gemini_pro pasa a gemini-4-argon (GA, sin
+    # expiration_date en OpenRouter), sustituyendo a gemini-3.1-pro-preview.
+    "gemini_pro": "gemini-4-argon",           # redacción de calidad (drafts voice-cloned)
     # NanoBanana (n8n LinkedIn/newsletter). ⚠️ Cambio de familia de API respecto al
     # anterior imagen-4.0-generate-001: este modelo se llama via :generateContent
     # (mismo endpoint que los tiers de texto) con
@@ -203,7 +206,7 @@ OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 _ROUTER_SLUGS = {
     "gemini_flash": "google/gemini-3.8-flash",
     "gemini_flash_lite": "google/gemini-3.5-flash-lite",
-    "gemini_pro": "google/gemini-3.1-pro-preview",
+    "gemini_pro": "google/gemini-4-argon",
     "claude_sonnet": "anthropic/claude-sonnet-5.5",
     "claude_opus": "anthropic/claude-opus-5.5",
     "claude_haiku": "anthropic/claude-haiku-5.5",
@@ -445,6 +448,9 @@ def capabilities(tier: str) -> dict[str, bool]:
 #     thinkingLevel=minimal (400).
 #   - gemini-3.1-pro-preview y gemini-2.5-pro solo funcionan en modo thinking:
 #     rechazan thinkingBudget=0 y thinkingLevel=minimal → sin thinkingConfig.
+#   - gemini-4-argon (gemini_pro desde el 2026-10-18) acepta thinkingBudget=0
+#     (0 thoughtsTokenCount), RECHAZA thinkingLevel=minimal (400) y acepta
+#     low/high y budgets >0 o -1; sin thinkingConfig razona en dinámico.
 #   - gemini-2.5-* no aceptan thinkingLevel («not supported for this model»).
 # Un modelo fuera de la tabla (override NK_MODEL_*) usa la regla histórica:
 # `pro` en el id → sin thinkingConfig; si no, thinkingBudget=0. Si un override
@@ -456,6 +462,7 @@ _GEMINI_MIN_THINKING: dict[str, dict[str, Any] | None] = {
     "gemini-3.5-flash-lite": {"thinkingLevel": "minimal"},
     "gemini-3.8-flash": {"thinkingBudget": 0},
     "gemini-3.1-pro-preview": None,
+    "gemini-4-argon": {"thinkingBudget": 0},
 }
 
 _SDK_THINKING_KEYS = {"thinkingBudget": "thinking_budget", "thinkingLevel": "thinking_level"}
@@ -508,8 +515,8 @@ def gemini_config_sdk(
     max_output_tokens (L-014). Con `model=` (o `tier=`) se traduce a lo que
     acepta ESE modelo (Gemini 3.x no es homogéneo: ver `_GEMINI_MIN_THINKING`);
     sin modelo se envía `thinking_budget=0` como siempre, que vale para
-    gemini_flash (gemini-3.8-flash) pero NO para gemini_flash_lite
-    (gemini-3.5-flash-lite) ni gemini_pro: pásalos con `model=`/`tier=`.
+    gemini_flash (gemini-3.8-flash) y gemini_pro (gemini-4-argon) pero NO para
+    gemini_flash_lite (gemini-3.5-flash-lite): pásalo con `model=`/`tier=`.
     thinking_budget=None = thinking dinámico del modelo (tiers de calidad).
     thinking_level="low"/"medium"/"high"/"minimal" = nivel de Gemini 3.x
     (excluyente con un thinking_budget distinto de 0/None).
@@ -656,8 +663,13 @@ def complete(
     temperature: float = 0.0,
     http_post: HttpPost | None = None,
     timeout: float = 30.0,
+    byok_provider_order: bool = True,
 ) -> LLMResult:
     """Completa un chat.
+
+    `byok_provider_order` (2026-10-18): en el leg OpenRouter pide primero el
+    endpoint con la clave BYOK (google-ai-studio / anthropic) con
+    `allow_fallbacks=True`. False no envía `provider.order`.
 
     Con `NK_ROUTER=openrouter` (enrutado) aplica la cascada del mandato
     LLM-FALLBACK-OPENROUTER-MANDATORY (2026-08-31):
@@ -697,6 +709,7 @@ def complete(
             temperature=temperature,
             http_post=http_post,
             timeout=timeout,
+            byok_provider_order=byok_provider_order,
         )
 
     if provider != "xai":
@@ -775,6 +788,7 @@ def _complete_routed(
     temperature: float,
     http_post: HttpPost | None,
     timeout: float,
+    byok_provider_order: bool = True,
 ) -> LLMResult:
     """Cascada openrouter → gemini_directo → openai → anthropic."""
     # El slug valida de paso que el tier sea enrutable (imagen/embeddings no).
@@ -808,6 +822,7 @@ def _complete_routed(
             return _leg_openrouter(
                 slug, leg_or, messages, json_schema, max_tokens, temperature,
                 post, timeout, reasoning=_router_default_reasoning(tier),
+                byok_provider_order=byok_provider_order,
             )
         except _TRANSPORT_ERRORS as exc:
             _fallo(leg_or, exc)
@@ -888,6 +903,7 @@ def complete_for(
     json_schema_strict: bool = True,
     data_collection: str | None = "deny",
     reasoning: Mapping[str, Any] | None = None,
+    byok_provider_order: bool = True,
 ) -> LLMResult:
     """Completa un chat según la política de la CLASE de trabajo.
 
@@ -919,6 +935,10 @@ def complete_for(
     - `messages[i]["content"]` puede ser una lista de partes estilo OpenAI
       (text, image_url con data: URI o URL, file con PDF en base64): cada leg
       la traduce a su formato.
+    - `byok_provider_order`: en el paso OpenRouter, `provider.order`
+      `["google-ai-studio"]` para google/* y `["anthropic"]` para anthropic/*
+      con `allow_fallbacks=True` (preferir el endpoint con clave BYOK sin
+      perder Vertex u otros como respaldo). False no lo envía.
 
     La clase (`nickname_common.ai_policy`, fuente canónica) fija la cadena
     ordenada de pasos `{tier, via}`. Antes de tocar red o presupuesto se
@@ -1039,6 +1059,7 @@ def complete_for(
                 temperature, post, timeout,
                 stop=stop, strict=json_schema_strict,
                 data_collection=data_collection, reasoning=reasoning,
+                byok_provider_order=byok_provider_order,
             )
         except _TRANSPORT_ERRORS as exc:
             motivo = (
@@ -1134,6 +1155,7 @@ def _run_step(
     strict: bool = True,
     data_collection: str | None = None,
     reasoning: Mapping[str, Any] | None = None,
+    byok_provider_order: bool = True,
 ) -> LLMResult:
     """Ejecuta un paso de la cadena con el leg de su vía."""
     if via == "openrouter":
@@ -1142,6 +1164,7 @@ def _run_step(
             post, timeout, track_upstream_cost=True, stop=stop, strict=strict,
             data_collection=data_collection,
             reasoning=reasoning if reasoning is not None else _router_default_reasoning(tier),
+            byok_provider_order=byok_provider_order,
         )
     if via == "anthropic_direct":
         return _leg_anthropic(
@@ -1378,6 +1401,33 @@ def _usd_to_micros(value: Any) -> int:
     return int(round(float(value) * 1_000_000))
 
 
+# --- Preferencia de proveedor BYOK en OpenRouter (2026-10-18) ---------------
+# Las claves BYOK de Diego viven en Google AI Studio y en Anthropic: se pide a
+# OpenRouter que pruebe primero ese endpoint (`provider.order`) sin perder el
+# resto como respaldo (`allow_fallbacks=True`, p.ej. Vertex). Comprobado con
+# llamadas reales el 2026-10-18 (GET /api/v1/generation: provider_name
+# "Google AI Studio", is_byok=true). Se desactiva con
+# `byok_provider_order=False` en complete() y complete_for().
+_BYOK_PROVIDER_ORDER = {
+    "google": ("google-ai-studio",),
+    "anthropic": ("anthropic",),
+}
+
+
+def _router_provider_prefs(
+    slug: str, *, data_collection: str | None, byok_provider_order: bool
+) -> dict[str, Any] | None:
+    """Objeto `provider` del body de OpenRouter, o None si no hay nada que pedir."""
+    prefs: dict[str, Any] = {}
+    order = _BYOK_PROVIDER_ORDER.get(slug.split("/", 1)[0]) if byok_provider_order else None
+    if order:
+        prefs["order"] = list(order)
+        prefs["allow_fallbacks"] = True
+    if data_collection is not None:
+        prefs["data_collection"] = data_collection
+    return prefs or None
+
+
 # --- finish_reason normalizado ------------------------------------------------
 # LLMResult.finish_reason vale siempre uno de FINISH_REASONS, sea cual sea el
 # leg: `stop` (terminó o tocó una stop sequence), `length` (max_tokens o
@@ -1588,6 +1638,7 @@ def _leg_openrouter(
     strict: bool = True,
     data_collection: str | None = None,
     reasoning: Mapping[str, Any] | None = None,
+    byok_provider_order: bool = True,
 ) -> LLMResult:
     """Leg OpenRouter. `temperature=None` no la envía (solo complete_for).
 
@@ -1596,7 +1647,8 @@ def _leg_openrouter(
     `usage.cost_details.upstream_inference_cost`, y `is_byok` (1/0) cuando
     informa `usage.is_byok`: con BYOK (decisión D-A, el crédito Team de
     Anthropic) `cost` es solo la comisión de OpenRouter y el gasto del modelo
-    viaja en upstream. complete() no lo pide, así que su `usage` no cambia.
+    viaja en upstream. complete() no lo pide; para él, con BYOK, `cost_micros`
+    pasa a ser comisión + upstream (el gasto real), no solo la comisión.
 
     `data_collection` → `provider.data_collection` (complete_for manda
     "deny": solo proveedores que no guardan ni entrenan con los datos).
@@ -1618,8 +1670,11 @@ def _leg_openrouter(
         body["response_format"] = _openai_response_format(json_schema, strict)
     if stop:
         body["stop"] = list(stop)
-    if data_collection is not None:
-        body["provider"] = {"data_collection": data_collection}
+    provider_prefs = _router_provider_prefs(
+        slug, data_collection=data_collection, byok_provider_order=byok_provider_order
+    )
+    if provider_prefs is not None:
+        body["provider"] = provider_prefs
     if reasoning is not None:
         body["reasoning"] = dict(reasoning)
 
@@ -1633,13 +1688,19 @@ def _leg_openrouter(
     if usage_raw.get("cost") is not None:
         # Milesimas de dolar para no meter floats en un dict[str, int].
         usage["cost_micros"] = _usd_to_micros(usage_raw["cost"])
+    details = usage_raw.get("cost_details") or {}
+    upstream = details.get("upstream_inference_cost") if isinstance(details, dict) else None
     if track_upstream_cost:
-        details = usage_raw.get("cost_details") or {}
-        upstream = details.get("upstream_inference_cost") if isinstance(details, dict) else None
         if upstream is not None:
             usage["upstream_cost_micros"] = _usd_to_micros(upstream)
         if isinstance(usage_raw.get("is_byok"), bool):
             usage["is_byok"] = int(usage_raw["is_byok"])
+    elif usage_raw.get("is_byok") is True and upstream is not None:
+        # complete() legado: con BYOK `cost` es solo la comisión de OpenRouter
+        # (0 en las llamadas reales del 2026-10-18) y el gasto del modelo viaja
+        # en upstream. Sus consumidores suman `cost_micros` a su BudgetGuard:
+        # sin esto registrarían 0 por llamadas que Google/Anthropic sí cobran.
+        usage["cost_micros"] = usage.get("cost_micros", 0) + _usd_to_micros(upstream)
     return LLMResult(
         text=text,
         parsed_json=_parse_json_text(text, json_schema),
@@ -1709,14 +1770,16 @@ def _gemini_leg_thinking(
 
     Sin `reasoning`: razonamiento mínimo del modelo en los tiers flash y
     dinámico en gemini_pro (calidad), como siempre (GOTCHA L-014).
-    `{"effort": X}` → thinkingLevel X (solo Gemini 3.x; en 2.5 se ignora);
+    `{"effort": X}` → thinkingLevel X (Gemini 3.x y posteriores; en 2.x se ignora);
     `{"max_tokens": n}` → thinkingBudget n; `{"enabled": False}` → mínimo;
     `{"enabled": True}` → dinámico.
     """
     budget: int | None = None if tier == "gemini_pro" else 0
     level: str | None = None
     if reasoning:
-        if reasoning.get("effort") is not None and model.startswith("gemini-3"):
+        # thinkingLevel existe desde Gemini 3 (incluido gemini-4-argon); los
+        # 2.x lo rechazan («not supported for this model»).
+        if reasoning.get("effort") is not None and not model.startswith(("gemini-2", "gemini-1")):
             effort = str(reasoning["effort"])
             level = "high" if effort == "xhigh" else effort
             budget = None

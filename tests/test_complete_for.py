@@ -218,12 +218,12 @@ class TestResolucionPorClase:
         res = llm.complete_for("contexto_largo", _MSG, guard=None,
                                budget_exempt=_EXENTO, http_post=red)
 
-        assert red.modelos() == ["gemini-3.1-pro-preview"]
+        assert red.modelos() == ["gemini-4-argon"]
         cfg = red.llamadas[0]["body"]["generationConfig"]
-        assert "thinkingConfig" not in cfg, "gemini-3.1-pro-preview rechaza thinking_budget=0"
+        assert "thinkingConfig" not in cfg, "gemini_pro razona en dinámico por defecto"
         assert "temperature" not in cfg
         assert res.provider == "google-direct"
-        assert res.model == "gemini-3.1-pro-preview"
+        assert res.model == "gemini-4-argon"
 
     def test_contexto_largo_sigue_por_claude_byok(self, monkeypatch):
         """SPEC §4: Gemini → Claude (BYOK, crédito Team) → OpenRouter."""
@@ -236,20 +236,20 @@ class TestResolucionPorClase:
         res = llm.complete_for("contexto_largo", _MSG, guard=None,
                                budget_exempt=_EXENTO, http_post=red)
 
-        assert red.modelos() == ["gemini-3.1-pro-preview", "anthropic/claude-sonnet-5.5"]
+        assert red.modelos() == ["gemini-4-argon", "anthropic/claude-sonnet-5.5"]
         assert res.provider == "openrouter:anthropic"
 
     def test_contexto_largo_acaba_en_gemini_pro_por_openrouter(self, monkeypatch):
         _router(monkeypatch)
         red = Red(
             ("openrouter.ai", "anthropic/claude-sonnet-5.5", (503, {})),
-            ("openrouter.ai", "google/gemini-3.1-pro-preview", (200, _chat_con_coste("ok"))),
+            ("openrouter.ai", "google/gemini-4-argon", (200, _chat_con_coste("ok"))),
         )
 
         res = llm.complete_for("contexto_largo", _MSG, guard=None,
                                budget_exempt=_EXENTO, http_post=red)
 
-        assert red.modelos() == ["anthropic/claude-sonnet-5.5", "google/gemini-3.1-pro-preview"]
+        assert red.modelos() == ["anthropic/claude-sonnet-5.5", "google/gemini-4-argon"]
         assert res.provider == "openrouter:google"
 
     @pytest.mark.parametrize("clase", ["codigo", "revision", "coordinacion"])
@@ -895,9 +895,9 @@ class TestPresupuesto:
 
         res = llm.complete_for("contexto_largo", _MSG, guard=guard, http_post=red)
 
-        esperado = estimate_cost_micros("gemini-3.1-pro-preview", input_tokens=1000,
+        esperado = estimate_cost_micros("gemini-4-argon", input_tokens=1000,
                                         output_tokens=5100)
-        assert esperado == 63_200  # 1000×2 + 5100×12 USD/M (gemini-3.1-pro-preview)
+        assert esperado == 106_000  # 1000×4 + 5100×20 USD/M (gemini-4-argon)
         assert res.usage_event.cost_micros == esperado
         assert res.usage_event.output_tokens == 5100
         assert almacen.sumas == [esperado]
@@ -914,7 +914,7 @@ class TestPresupuesto:
 
         assert res.usage_event.output_tokens == 1024
         assert almacen.sumas == [estimate_cost_micros(
-            "gemini-3.1-pro-preview", input_tokens=1000, output_tokens=1024)]
+            "gemini-4-argon", input_tokens=1000, output_tokens=1024)]
 
     def test_tope_por_llamada_superado_conserva_la_respuesta(self, monkeypatch):
         _router(monkeypatch)

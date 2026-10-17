@@ -55,7 +55,7 @@ from dataclasses import dataclass
 # Versionado explícito: cualquier LLMUsageEventV1 con cost_source="catalog"
 # debería poder trazarse a la versión del catálogo que produjo esa cifra si
 # el consumidor decide guardarla (este módulo no la persiste por sí mismo).
-CATALOG_VERSION = "2026-10-18.1"
+CATALOG_VERSION = "2026-10-18.2"
 
 
 @dataclass(frozen=True)
@@ -118,6 +118,15 @@ _PRICES: dict[str, ModelPrice] = {
         input_usd_per_million=2.00, output_usd_per_million=12.00,
         long_context_min_prompt_tokens=200_000,
         long_input_usd_per_million=4.00, long_output_usd_per_million=18.00,
+    ),
+    # gemini_pro desde el 2026-10-18 (D-F bis). OpenRouter lista 2/10 USD/M
+    # en google-ai-studio con discount 0,5; Google cobra 4/20, confirmado por
+    # el método 1 con una llamada BYOK real del 2026-10-18 (36 tokens de
+    # entrada + 5 de salida → upstream_inference_cost 0,000244 USD =
+    # 36·4 + 5·20 µUSD; a 2/10 serían 122 µUSD). Sin `overrides` de contexto
+    # largo en el listado de ese día. Ver docs/evidence/gemini4-argon-smoke-20261018.json.
+    "gemini-4-argon": ModelPrice(
+        input_usd_per_million=4.00, output_usd_per_million=20.00
     ),
     # Claude y GPT del registro (ids de la API directa; el slug de OpenRouter
     # es anthropic/claude-*-5.5 y openai/<id>). Mismo método y fecha.

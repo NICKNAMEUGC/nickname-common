@@ -1,0 +1,50 @@
+{
+  "smoke": "gemini_tiers_D-F",
+  "fecha_utc": "2026-10-17T22:29:20+00:00",
+  "catalog_version": "2026-10-18.2",
+  "resultados": [
+    {
+      "tier": "gemini_pro",
+      "via": "gemini_direct",
+      "model": "gemini-4-argon",
+      "json_schema": false,
+      "ok": true,
+      "provider": "google-direct",
+      "finish_reason": "stop",
+      "outcome": "served",
+      "is_byok": null,
+      "input_tokens": 39,
+      "output_tokens": 5,
+      "cost_micros": 256,
+      "cost_source": "catalog"
+    },
+    {
+      "tier": "gemini_pro",
+      "via": "openrouter",
+      "model": "google/gemini-4-argon",
+      "json_schema": false,
+      "ok": true,
+      "provider": "openrouter:google",
+      "finish_reason": "stop",
+      "outcome": "served",
+      "is_byok": true,
+      "input_tokens": 39,
+      "output_tokens": 5,
+      "cost_micros": 256,
+      "cost_source": "provider_response",
+      "upstream_cost_micros": 256,
+      "openrouter_fee_micros": 0,
+      "catalog_estimate_micros": 256,
+      "generation": {
+        "provider_name": "Google AI Studio",
+        "is_byok": true,
+        "upstream_inference_cost": 0.000256,
+        "native_tokens_prompt": 39,
+        "native_tokens_completion": 5,
+        "native_tokens_reasoning": 0
+      }
+    }
+  ],
+  "todo_ok": true,
+  "nota": "gemini_pro = gemini-4-argon (D-F bis, 2026-10-18). Directo: thinkingBudget=0 aceptado, thinkingLevel=minimal rechazado (400), sin thinkingConfig razona en dinámico. OpenRouter con provider.order=[google-ai-studio], allow_fallbacks=true y data_collection=deny: provider_name 'Google AI Studio', is_byok=true; upstream 256 µUSD = 39·4 + 5·20 (catálogo 4/20 USD/M; OpenRouter lista 2/10 con discount 0,5). Una ejecución anterior del mismo smoke, inmediatamente después de la llamada directa con la misma clave de Google, salió por AI Studio con is_byok=false (128 µUSD en créditos de OpenRouter al precio con descuento): el BYOK no está garantizado en cada llamada; el coste se contabiliza bien en los dos casos."
+}

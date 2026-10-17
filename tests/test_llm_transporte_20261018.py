@@ -92,12 +92,12 @@ class TestRegistroDF:
     def test_defaults_gemini_3(self):
         assert llm.get_model("gemini_flash") == "gemini-3.8-flash"
         assert llm.get_model("gemini_flash_lite") == "gemini-3.5-flash-lite"
-        assert llm.get_model("gemini_pro") == "gemini-3.1-pro-preview"
+        assert llm.get_model("gemini_pro") == "gemini-4-argon"
 
     def test_slugs_openrouter_gemini_3(self):
         assert llm.router_slug("gemini_flash") == "google/gemini-3.8-flash"
         assert llm.router_slug("gemini_flash_lite") == "google/gemini-3.5-flash-lite"
-        assert llm.router_slug("gemini_pro") == "google/gemini-3.1-pro-preview"
+        assert llm.router_slug("gemini_pro") == "google/gemini-4-argon"
 
     def test_ningun_tier_apunta_a_gemini_2_5(self):
         retirados_20261020 = {"gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"}
@@ -115,7 +115,8 @@ class TestThinkingGemini3:
     @pytest.mark.parametrize("tier, esperado", [
         ("gemini_flash_lite", {"thinkingLevel": "minimal"}),
         ("gemini_flash", {"thinkingBudget": 0}),
-        ("gemini_pro", None),
+        # gemini-4-argon acepta thinkingBudget=0 y rechaza minimal (API, 2026-10-18).
+        ("gemini_pro", {"thinkingBudget": 0}),
     ])
     def test_rest_por_tier(self, tier, esperado):
         cfg = llm.gemini_config_rest(tier=tier, maxOutputTokens=64)
@@ -128,6 +129,8 @@ class TestThinkingGemini3:
         cfg = llm.gemini_config_sdk(model="gemini-3.8-flash")
         assert cfg["thinking_config"] == {"thinking_budget": 0}
         assert "thinking_config" not in llm.gemini_config_sdk(model="gemini-3.1-pro-preview")
+        cfg = llm.gemini_config_sdk(model="gemini-4-argon")
+        assert cfg["thinking_config"] == {"thinking_budget": 0}
 
     def test_sin_modelo_conserva_el_comportamiento_legado(self):
         assert llm.gemini_config_rest()["thinkingConfig"] == {"thinkingBudget": 0}
@@ -295,22 +298,26 @@ class TestOpenRouterPreferencias:
         return red.body
 
     def test_data_collection_deny_por_defecto(self):
-        assert self._llamar()["provider"] == {"data_collection": "deny"}
+        assert self._llamar()["provider"]["data_collection"] == "deny"
 
     def test_data_collection_desactivable(self):
-        assert "provider" not in self._llamar(data_collection=None)
-        assert self._llamar(data_collection="allow")["provider"] == {"data_collection": "allow"}
+        assert "data_collection" not in self._llamar(data_collection=None)["provider"]
+        assert "provider" not in self._llamar(data_collection=None, byok_provider_order=False)
+        assert self._llamar(data_collection="allow")["provider"]["data_collection"] == "allow"
 
     def test_data_collection_invalido(self):
         with pytest.raises(ValueError):
             self._llamar(data_collection="nunca")
 
-    def test_complete_legado_no_manda_provider(self, monkeypatch):
+    def test_complete_legado_solo_manda_el_orden_byok(self, monkeypatch):
         monkeypatch.setenv(llm.ROUTER_ENV, "openrouter")
         red = Red(**{"openrouter.ai": (200, _chat())})
         llm.complete("claude_sonnet", _MSG, http_post=red)
-        assert "provider" not in red.body
+        assert red.body["provider"] == {"order": ["anthropic"], "allow_fallbacks": True}
         assert "reasoning" not in red.body
+        llm.complete("claude_sonnet", _MSG, http_post=red, byok_provider_order=False)
+        assert "provider" not in red.body
+
 
     def test_reasoning_passthrough(self):
         assert self._llamar(reasoning={"enabled": False})["reasoning"] == {"enabled": False}
@@ -560,3 +567,81 @@ class TestStopYStrict:
         with pytest.raises(ValueError):
             llm.complete_for("clasificacion_masiva", _MSG, guard=None,
                              budget_exempt=_EXENTO, http_post=Red(), stop=stop)
+
+
+class TestOrdenProveedorByok:
+    """provider.order hacia el endpoint con clave BYOK (2026-10-18)."""
+
+    @pytest.fixture(autouse=True)
+    def _clave(self, monkeypatch):
+        monkeypatch.setenv(llm.ROUTER_KEY_ENV, "sk-or-test")
+
+    def _llamar(self, clase="cliente_dinero_tiempo_real", **kw):
+        red = Red(**{"openrouter.ai": (200, _chat())})
+        llm.complete_for(clase, _MSG, guard=None, budget_exempt=_EXENTO, http_post=red, **kw)
+        return red.body
+
+    @pytest.mark.parametrize("tier, orden", [
+        ("gemini_pro", ["google-ai-studio"]),
+        ("gemini_flash", ["google-ai-studio"]),
+        ("gemini_flash_lite", ["google-ai-studio"]),
+        ("claude_sonnet", ["anthropic"]),
+        ("claude_opus", ["anthropic"]),
+    ])
+    def test_orden_por_familia_con_respaldo(self, tier, orden):
+        prov = self._llamar(tier=tier)["provider"]
+        assert prov == {"order": orden, "allow_fallbacks": True, "data_collection": "deny"}
+
+    def test_gpt_no_lleva_orden(self):
+        prov = self._llamar(tier="gpt_quality")["provider"]
+        assert prov == {"data_collection": "deny"}
+
+    def test_desactivable(self):
+        prov = self._llamar(tier="gemini_pro", byok_provider_order=False)["provider"]
+        assert prov == {"data_collection": "deny"}
+
+    def test_complete_legado_gemini(self, monkeypatch):
+        monkeypatch.setenv(llm.ROUTER_ENV, "openrouter")
+        red = Red(**{"openrouter.ai": (200, _chat())})
+        llm.complete("gemini_pro", _MSG, http_post=red)
+        assert red.body["provider"] == {"order": ["google-ai-studio"], "allow_fallbacks": True}
+
+
+class TestCosteByokEnCompleteLegado:
+    """P1: con BYOK, OpenRouter devuelve cost=0 (solo comisión) y el gasto real en
+    cost_details.upstream_inference_cost (llamadas reales del 2026-10-18). Los
+    consumidores de complete() suman usage["cost_micros"] a su BudgetGuard."""
+
+    def _byok(self, cost=0, upstream=0.000244, is_byok=True):
+        body = _chat()
+        body["usage"] = {"prompt_tokens": 36, "completion_tokens": 5, "total_tokens": 41,
+                         "cost": cost, "is_byok": is_byok,
+                         "cost_details": {"upstream_inference_cost": upstream}}
+        return body
+
+    def _complete(self, monkeypatch, payload):
+        monkeypatch.setenv(llm.ROUTER_ENV, "openrouter")
+        monkeypatch.setenv(llm.ROUTER_KEY_ENV, "sk-or-test")
+        red = Red(**{"openrouter.ai": (200, payload)})
+        return llm.complete("gemini_pro", _MSG, http_post=red)
+
+    def test_byok_suma_upstream(self, monkeypatch):
+        res = self._complete(monkeypatch, self._byok())
+        assert res.usage["cost_micros"] == 244
+        assert "upstream_cost_micros" not in res.usage and "is_byok" not in res.usage
+
+    def test_byok_con_comision(self, monkeypatch):
+        res = self._complete(monkeypatch, self._byok(cost=0.00001))
+        assert res.usage["cost_micros"] == 254
+
+    def test_sin_byok_no_cuenta_dos_veces(self, monkeypatch):
+        res = self._complete(monkeypatch, self._byok(cost=0.0001, upstream=0.0001,
+                                                       is_byok=False))
+        assert res.usage["cost_micros"] == 100
+
+    def test_complete_for_no_cuenta_dos_veces(self, monkeypatch):
+        monkeypatch.setenv(llm.ROUTER_KEY_ENV, "sk-or-test")
+        red = Red(**{"openrouter.ai": (200, self._byok())})
+        res = llm.complete_for("cliente_dinero_tiempo_real", _MSG, guard=None,
+                               budget_exempt=_EXENTO, http_post=red, tier="gemini_pro")
+        assert res.usage_event.cost_micros == 244

@@ -71,7 +71,7 @@ class TestEnrutado:
         res = llm.complete("gemini_pro", [{"role": "user", "content": "hola"}], http_post=post)
 
         assert cap["url"] == llm.OPENROUTER_CHAT_URL
-        assert cap["body"]["model"] == "google/gemini-3.1-pro-preview", (
+        assert cap["body"]["model"] == "google/gemini-4-argon", (
             "enrutar no puede cambiar de modelo a escondidas"
         )
         # Etiqueta del leg (mandato 2026-08-31): familia del slug de OpenRouter.

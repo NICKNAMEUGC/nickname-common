@@ -67,8 +67,15 @@ def test_known_models_lists_only_verified_entries():
         "claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5",
         "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro",
         "gemini-3.1-pro-preview", "gemini-3.5-flash-lite", "gemini-3.8-flash",
-        "gpt-5.4-mini", "gpt-6-astra",
+        "gemini-4-argon", "gpt-5.4-mini", "gpt-6-astra",
     )
+
+
+def test_gemini_4_argon_precio_upstream_byok_20261018():
+    """gemini_pro (D-F bis): OpenRouter lista 2/10 con discount 0,5; el cargo
+    upstream BYOK real fue 244 µUSD por 36 tokens de entrada + 5 de salida → 4/20."""
+    assert cost_catalog.estimate_cost_micros(
+        "gemini-4-argon", input_tokens=36, output_tokens=5) == 244
 
 
 def test_gemini_3_precios_de_openrouter_20261018():

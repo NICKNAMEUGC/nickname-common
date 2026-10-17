@@ -195,7 +195,7 @@ class TestLegGeminiDirecto:
         )
 
     def test_gemini_pro_no_manda_thinking_budget_cero(self, monkeypatch):
-        """GOTCHA L-014: gemini-3.1-pro-preview rechaza thinking_budget=0 con 400."""
+        """GOTCHA L-014: el leg directo deja gemini_pro en razonamiento dinámico (sin thinkingConfig)."""
         _enrutado(monkeypatch)
         monkeypatch.setenv(llm.GEMINI_KEY_ENV, "g-key-test")
         post = Transporte({
@@ -207,7 +207,7 @@ class TestLegGeminiDirecto:
             "gemini_pro", [{"role": "user", "content": "x"}], http_post=post
         )
 
-        assert "gemini-3.1-pro-preview:generateContent" in post.llamadas[1]["url"]
+        assert "gemini-4-argon:generateContent" in post.llamadas[1]["url"]
         assert "thinkingConfig" not in post.llamadas[1]["body"]["generationConfig"]
         assert res.provider == "google-direct"
 

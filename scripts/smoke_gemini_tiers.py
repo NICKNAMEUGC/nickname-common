@@ -19,9 +19,13 @@ Salida: un resumen JSON sin contenido (ni prompt ni respuesta): tier, vía,
 proveedor, ok/fallo, finish_reason, is_byok, tokens, coste y, en OpenRouter,
 el coste upstream frente al del catálogo (contraste de precios).
 
+- En OpenRouter consulta además GET /api/v1/generation?id=<id> y anota
+  `provider_name` e `is_byok` (comprueba el `provider.order` hacia
+  google-ai-studio, donde está la clave BYOK).
+
 Uso:
     GEMINI_API_KEY=... OPENROUTER_API_KEY=... \\
-        python scripts/smoke_gemini_tiers.py --live [--out docs/evidence/x.json]
+        python scripts/smoke_gemini_tiers.py --live [--tiers gemini_pro] [--out docs/evidence/x.json]
 """
 
 from __future__ import annotations
@@ -32,6 +36,9 @@ import json
 import os
 import pathlib
 import sys
+import time
+import urllib.error
+import urllib.request
 
 # Ejecutable desde un checkout sin instalar el paquete.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -51,6 +58,24 @@ PROMPT = [{"role": "user", "content": 'Responde exactamente {"ok": true} si me l
 PROMPT_TEXTO = [{"role": "user", "content": "Responde solo con la palabra: ok"}]
 
 
+def _generation(gen_id: str) -> dict:
+    """provider_name / is_byok de una generación de OpenRouter (sin contenido)."""
+    headers = {"Authorization": f"Bearer {os.environ[llm.ROUTER_KEY_ENV].strip()}"}
+    for _ in range(8):
+        time.sleep(2)
+        req = urllib.request.Request(
+            f"https://openrouter.ai/api/v1/generation?id={gen_id}", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())["data"]
+        except urllib.error.HTTPError:
+            continue
+        return {k: data.get(k) for k in (
+            "provider_name", "is_byok", "upstream_inference_cost",
+            "native_tokens_prompt", "native_tokens_completion", "native_tokens_reasoning")}
+    return {"error": "generation_no_disponible"}
+
+
 def _una(tier: str, via: str) -> dict:
     saved = {k: os.environ.get(k) for k in (llm.ROUTER_ENV, llm.GEMINI_KEY_ENV, llm.GEMINI_KEY_FALLBACK_ENV)}
     try:
@@ -64,6 +89,14 @@ def _una(tier: str, via: str) -> dict:
         con_schema = tier == "gemini_flash_lite"
         fila = {"tier": tier, "via": via, "model": llm.get_model(tier) if via == "gemini_direct"
                 else llm.router_slug(tier), "json_schema": con_schema}
+        ids: list[str] = []
+
+        def post(url, headers, body, timeout):
+            status, raw = llm._urllib_post(url, headers, body, timeout)  # noqa: SLF001
+            if "openrouter.ai" in url and status == 200:
+                ids.append(json.loads(raw).get("id", ""))
+            return status, raw
+
         try:
             res = llm.complete_for(
                 CLASE,
@@ -76,6 +109,7 @@ def _una(tier: str, via: str) -> dict:
                 reasoning={"effort": "low"} if pro else None,
                 timeout=90,
                 job_id="smoke_gemini_tiers",
+                http_post=post,
             )
         except Exception as exc:  # noqa: BLE001 — el smoke resume, no relanza
             fila.update(ok=False, error=type(exc).__name__,
@@ -96,11 +130,12 @@ def _una(tier: str, via: str) -> dict:
         if via == "openrouter":
             catalogo = estimate_cost_micros(
                 llm.get_model(tier), input_tokens=u.get("prompt_tokens"),
-                output_tokens=u.get("completion_tokens"),
+                output_tokens=res.usage_event.output_tokens,
             )
             fila.update(upstream_cost_micros=u.get("upstream_cost_micros"),
                         openrouter_fee_micros=u.get("cost_micros"),
-                        catalog_estimate_micros=catalogo)
+                        catalog_estimate_micros=catalogo,
+                        generation=_generation(ids[-1]) if ids and ids[-1] else None)
         return fila
     finally:
         for k, v in saved.items():
@@ -114,6 +149,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--live", action="store_true", help="llamar de verdad (gasta céntimos)")
     ap.add_argument("--out", help="ruta donde guardar el resumen JSON (sin contenido)")
+    ap.add_argument("--tiers", nargs="+", choices=TIERS, default=list(TIERS),
+                    help="tiers a probar (por defecto, los tres)")
     args = ap.parse_args(argv)
     if not args.live:
         print("Sin --live no se llama a nada.", file=sys.stderr)
@@ -123,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Faltan en el entorno: {', '.join(faltan)}", file=sys.stderr)
         return 2
     os.environ.setdefault(llm.ROUTER_AGENT_ENV, "nickname-common-smoke")
-    filas = [_una(tier, via) for tier in TIERS for via in ("gemini_direct", "openrouter")]
+    filas = [_una(tier, via) for tier in args.tiers for via in ("gemini_direct", "openrouter")]
     resumen = {
         "smoke": "gemini_tiers_D-F",
         "fecha_utc": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
