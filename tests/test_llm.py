@@ -13,8 +13,8 @@ from nickname_common.llm import (
 
 
 def test_get_model_defaults():
-    assert llm.get_model("gemini_flash") == "gemini-2.5-flash"
-    assert llm.get_model("gemini_pro") == "gemini-2.5-pro"
+    assert llm.get_model("gemini_flash") == "gemini-3.8-flash"
+    assert llm.get_model("gemini_pro") == "gemini-3.1-pro-preview"
     assert llm.get_model("claude_sonnet").startswith("claude-")
     # Reparación 2026-10-17: grok-3-mini y grok-4 ya no existen en OpenRouter.
     assert llm.get_model("grok_fast") == "grok-4.3"
@@ -24,7 +24,7 @@ def test_get_model_defaults():
 def test_get_model_env_override(monkeypatch):
     monkeypatch.setenv("NK_MODEL_GEMINI_FLASH", "gemini-9-flash")
     assert llm.get_model("gemini_flash") == "gemini-9-flash"
-    assert llm.get_model("gemini_pro") == "gemini-2.5-pro"
+    assert llm.get_model("gemini_pro") == "gemini-3.1-pro-preview"
 
 
 def test_get_model_unknown_tier():

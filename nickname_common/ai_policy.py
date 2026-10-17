@@ -319,6 +319,43 @@ def api_chain(clase: str) -> tuple[ApiStep, ...]:
     return policy_for(clase).api_chain
 
 
+def via_serves_tier(via: str, tier: str) -> bool:
+    """¿Puede la vía servir el tier? (openrouter: enrutable; directa: su familia)."""
+    if via == "openrouter":
+        return llm.is_routable(tier)
+    return _DIRECT_VIA_PROVIDER.get(via) == llm.provider_of(tier)
+
+
+def api_chain_for_tier(clase: str, tier: str) -> tuple[ApiStep, ...]:
+    """Cadena API de la clase con el tier FIJADO (fase «solo transporte», D-E).
+
+    Mismas vías que la clase y en su orden, cada una una sola vez y solo si
+    sirve al tier. Si la clase tiene pasos de la MISMA familia que el tier,
+    se toma el orden de vías de esos pasos (D2: Claude por OpenRouter
+    primero; Gemini y GPT, directo primero); si no, el de todos los pasos.
+    Si ninguna vía de la clase le sirve (o la clase no tiene cadena API), la
+    cadena legado del tier: `openrouter` (si es enrutable) → vía directa de
+    su familia (si existe; xAI no tiene). D-E: cambiar de FAMILIA exige eval;
+    esto solo fija el tier que el consumidor ya usa, sin elegir otro.
+    """
+    if tier not in llm.all_tiers():
+        raise KeyError(f"Tier de modelo desconocido: {tier!r}")
+    chain = api_chain(clase)
+    family = llm.provider_of(tier)
+    same_family = [s for s in chain if llm.provider_of(s.tier) == family]
+    steps: list[ApiStep] = []
+    seen: set[str] = set()
+    for step in (same_family or chain):
+        if step.via in seen or not via_serves_tier(step.via, tier):
+            continue
+        seen.add(step.via)
+        steps.append(ApiStep(tier=tier, via=step.via))
+    if steps:
+        return tuple(steps)
+    legacy = [via for via in ("openrouter", *_DIRECT_VIA_PROVIDER) if via_serves_tier(via, tier)]
+    return tuple(ApiStep(tier=tier, via=via) for via in legacy)
+
+
 def subscription_chain(clase: str) -> tuple[SubscriptionStep, ...]:
     """Cadena de CLIs de suscripción de la clase, para el broker (ola 4)."""
     return policy_for(clase).subscription_chain

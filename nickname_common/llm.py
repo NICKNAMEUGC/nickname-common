@@ -47,14 +47,19 @@ otro proveedor. Los legs openai/anthropic CRUZAN de familia por diseño del
 mandato de disponibilidad — el guard L-014 (`CrossProviderOverrideError`) es
 de OVERRIDES de env (`NK_MODEL_<TIER>`), no de la cascada.
 
-Regla L-014 incorporada: thinking_budget=0 por defecto en los tiers flash —
-en Gemini 2.5 el razonamiento consume max_output_tokens ANTES del output y
-trunca JSON/respuestas con caps ajustados. Pasar thinking_budget=None para
-permitir thinking dinámico (tiers de calidad, ej. redacción con gemini_pro).
+Regla L-014 incorporada: razonamiento mínimo por defecto en los tiers flash —
+el razonamiento consume max_output_tokens ANTES del output y trunca
+JSON/respuestas con caps ajustados. Pasar thinking_budget=None para permitir
+thinking dinámico (tiers de calidad, ej. redacción con gemini_pro).
 
-GOTCHA (verificado 2026-06-12): gemini-2.5-pro RECHAZA thinking_budget=0 con
-400 "Budget 0 is invalid. This model only works in thinking mode". Para el
-tier gemini_pro usar SIEMPRE thinking_budget=None.
+GOTCHA (verificado 2026-06-12 en 2.5 y 2026-10-18 en 3.x): los Pro solo
+funcionan en modo thinking (400 "Budget 0 is invalid"). Y Gemini 3.x no es
+homogéneo (D-F, 2026-10-18): gemini-3.5-flash-lite rechaza thinkingBudget=0
+y quiere thinkingLevel=minimal; gemini-3.8-flash acepta thinkingBudget=0 y
+rechaza minimal. `gemini_config_*(model=...)` y el leg directo lo resuelven
+por modelo (`_GEMINI_MIN_THINKING`). En OpenRouter el razonamiento de Gemini
+3.x es obligatorio (`reasoning.enabled=false` → 400): los tiers flash salen
+con `reasoning.effort="low"` por defecto (0 tokens de razonamiento medidos).
 
 Tier `gemini_flash_lite` (2026-09-11, SPEC-RAILWAY-AUTOMATION-MIGRATION-20260911
 WI-1): jobs Railway recurrentes de bajo coste — clasificar un delta ya acotado,
@@ -80,6 +85,15 @@ nuevo debe usar `complete_for`. Tiers añadidos en la ola 1: `claude_opus`,
 no enrutable, como `imagen`). El guard L-014 cubre también el override de
 slug `NK_MODEL_<TIER>_SLUG` (en `router_slug`, así que complete() lo hereda).
 Este módulo importa `ai_policy` al final para validar la política al cargar.
+
+Transporte, 2026-10-18 (D-F y entregables de la ola 1): Gemini 3.x en todos
+los tiers Gemini (OpenRouter retira 2.5 el 2026-10-20); en complete_for los
+pasos `@openrouter` se usan con solo tener `OPENROUTER_API_KEY` (rollback:
+`NK_ROUTER=off`); `complete_for(..., tier=)` fija el tier; el paso OpenRouter
+manda `provider.data_collection="deny"` y acepta `reasoning`;
+`LLMResult.finish_reason` normalizado; mensajes multimodales estilo OpenAI,
+`stop` y `strict` configurable en todos los legs. complete() legado conserva
+su semántica de router (`NK_ROUTER=openrouter`).
 """
 
 from __future__ import annotations
@@ -88,6 +102,7 @@ import dataclasses
 import http.client
 import json
 import logging
+import mimetypes
 import os
 import urllib.error
 import urllib.request
@@ -117,11 +132,19 @@ _LOG = logging.getLogger("nickname_common.llm")
 # (OpenRouter), ya no listados el 2026-10-17. Sustituirlos es una REPARACIÓN
 # (el modelo ya no existe), no un cambio de calidad: el refresco de calidad
 # de los demás tiers es la decisión D-E, servicio a servicio con su eval.
+# D-F (Diego, 2026-10-18): OpenRouter retira google/gemini-2.5-flash,
+# -flash-lite y -pro el 2026-10-20 (`expiration_date` en GET /api/v1/models,
+# leído el 2026-10-18) y Google ya devuelve 404 «no longer available to new
+# users» a gemini-2.5-flash-lite por la API directa. Todo Gemini pasa a 3.x
+# en directo Y en OpenRouter; ids comprobados el 2026-10-18 en GET
+# /v1beta/models de Google y en el listado público de OpenRouter. Cambiar el
+# tier de un consumidor sigue exigiendo su eval (D-E); para la fase «solo
+# transporte» complete_for acepta `tier=` y fija el tier sin cambiar de clase.
 _DEFAULTS = {
     # Gemini
-    "gemini_flash": "gemini-2.5-flash",       # clasificación, triaje, alto volumen
-    "gemini_flash_lite": "gemini-2.5-flash-lite",  # jobs Railway de bajo coste (SPEC-RAILWAY-AUTOMATION-MIGRATION-20260911): clasificación de un delta acotado, resumen pequeño de comentarios anonimizados. NUNCA redacción que deba superar un eval de calidad — para eso gemini_flash.
-    "gemini_pro": "gemini-2.5-pro",           # redacción de calidad (drafts voice-cloned)
+    "gemini_flash": "gemini-3.8-flash",       # clasificación, triaje, alto volumen
+    "gemini_flash_lite": "gemini-3.5-flash-lite",  # jobs Railway de bajo coste (SPEC-RAILWAY-AUTOMATION-MIGRATION-20260911): clasificación de un delta acotado, resumen pequeño de comentarios anonimizados. NUNCA redacción que deba superar un eval de calidad — para eso gemini_flash.
+    "gemini_pro": "gemini-3.1-pro-preview",   # redacción de calidad (drafts voice-cloned)
     # NanoBanana (n8n LinkedIn/newsletter). ⚠️ Cambio de familia de API respecto al
     # anterior imagen-4.0-generate-001: este modelo se llama via :generateContent
     # (mismo endpoint que los tiers de texto) con
@@ -178,9 +201,9 @@ OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 # tier -> slug de OpenRouter. La familia se conserva: enrutar NO es cambiar de
 # modelo a escondidas. Cambiar de modelo es una decision aparte y explicita.
 _ROUTER_SLUGS = {
-    "gemini_flash": "google/gemini-2.5-flash",
-    "gemini_flash_lite": "google/gemini-2.5-flash-lite",
-    "gemini_pro": "google/gemini-2.5-pro",
+    "gemini_flash": "google/gemini-3.8-flash",
+    "gemini_flash_lite": "google/gemini-3.5-flash-lite",
+    "gemini_pro": "google/gemini-3.1-pro-preview",
     "claude_sonnet": "anthropic/claude-sonnet-5.5",
     "claude_opus": "anthropic/claude-opus-5.5",
     "claude_haiku": "anthropic/claude-haiku-5.5",
@@ -359,6 +382,10 @@ class LLMResult:
     # Solo lo rellena complete_for (ola 1 del plano IA). complete() lo deja en
     # None, así que ningún consumidor existente ve un cambio.
     usage_event: LLMUsageEventV1 | None = None
+    # Motivo de fin normalizado en TODOS los legs (FINISH_REASONS): "stop",
+    # "length", "content_filter" u "other". Campo nuevo con default: no
+    # rompe a quien construye LLMResult a mano.
+    finish_reason: str = "other"
 
 
 def get_model(tier: str) -> str:
@@ -409,26 +436,112 @@ def capabilities(tier: str) -> dict[str, bool]:
     return dict(_CAPABILITIES[tier])
 
 
-def gemini_config_sdk(thinking_budget=0, **kwargs) -> dict:
+# Razonamiento MÍNIMO que acepta cada modelo Gemini (regla L-014: proteger
+# max_output_tokens). Verificado por API el 2026-10-18 con llamadas mínimas a
+# :generateContent. Gemini 3.x NO es homogéneo, por eso va por modelo:
+#   - gemini-3.5-flash-lite RECHAZA thinkingBudget=0 (400) y acepta
+#     thinkingLevel=minimal (sin razonamiento).
+#   - gemini-3.8-flash acepta thinkingBudget=0 (sin razonamiento) y RECHAZA
+#     thinkingLevel=minimal (400).
+#   - gemini-3.1-pro-preview y gemini-2.5-pro solo funcionan en modo thinking:
+#     rechazan thinkingBudget=0 y thinkingLevel=minimal → sin thinkingConfig.
+#   - gemini-2.5-* no aceptan thinkingLevel («not supported for this model»).
+# Un modelo fuera de la tabla (override NK_MODEL_*) usa la regla histórica:
+# `pro` en el id → sin thinkingConfig; si no, thinkingBudget=0. Si un override
+# nuevo la rechaza, el 400 lo verá el canary (task 15) o su smoke.
+_GEMINI_MIN_THINKING: dict[str, dict[str, Any] | None] = {
+    "gemini-2.5-flash": {"thinkingBudget": 0},
+    "gemini-2.5-flash-lite": {"thinkingBudget": 0},
+    "gemini-2.5-pro": None,
+    "gemini-3.5-flash-lite": {"thinkingLevel": "minimal"},
+    "gemini-3.8-flash": {"thinkingBudget": 0},
+    "gemini-3.1-pro-preview": None,
+}
+
+_SDK_THINKING_KEYS = {"thinkingBudget": "thinking_budget", "thinkingLevel": "thinking_level"}
+
+
+def _gemini_min_thinking(model: str) -> dict[str, Any] | None:
+    """thinkingConfig (REST) del razonamiento mínimo que acepta `model`."""
+    if model in _GEMINI_MIN_THINKING:
+        cfg = _GEMINI_MIN_THINKING[model]
+        return dict(cfg) if cfg is not None else None
+    if "pro" in model:
+        return None
+    return {"thinkingBudget": 0}
+
+
+def _gemini_thinking(
+    thinking_budget: int | None,
+    *,
+    model: str | None,
+    tier: str | None,
+    thinking_level: str | None,
+) -> dict[str, Any] | None:
+    """thinkingConfig REST (camelCase) o None si no hay que enviarlo."""
+    if tier is not None and model is None:
+        model = get_model(tier)
+    if thinking_level is not None:
+        if thinking_budget not in (0, None):
+            raise ValueError(
+                "thinking_budget y thinking_level son excluyentes: Gemini rechaza los dos"
+            )
+        return {"thinkingLevel": thinking_level}
+    if thinking_budget is None:
+        return None
+    if thinking_budget == 0 and model is not None:
+        return _gemini_min_thinking(model)
+    return {"thinkingBudget": thinking_budget}
+
+
+def gemini_config_sdk(
+    thinking_budget=0,
+    *,
+    model: str | None = None,
+    tier: str | None = None,
+    thinking_level: str | None = None,
+    **kwargs,
+) -> dict:
     """Config para el SDK google-genai (snake_case; el SDK acepta dicts).
 
-    thinking_budget=0 (default) = paridad 2.0 / proteger max_output_tokens (L-014).
+    thinking_budget=0 (default) = razonamiento mínimo / proteger
+    max_output_tokens (L-014). Con `model=` (o `tier=`) se traduce a lo que
+    acepta ESE modelo (Gemini 3.x no es homogéneo: ver `_GEMINI_MIN_THINKING`);
+    sin modelo se envía `thinking_budget=0` como siempre, que vale para
+    gemini_flash (gemini-3.8-flash) pero NO para gemini_flash_lite
+    (gemini-3.5-flash-lite) ni gemini_pro: pásalos con `model=`/`tier=`.
     thinking_budget=None = thinking dinámico del modelo (tiers de calidad).
+    thinking_level="low"/"medium"/"high"/"minimal" = nivel de Gemini 3.x
+    (excluyente con un thinking_budget distinto de 0/None).
     """
     cfg = dict(kwargs)
-    if thinking_budget is not None:
-        cfg["thinking_config"] = {"thinking_budget": thinking_budget}
+    thinking = _gemini_thinking(
+        thinking_budget, model=model, tier=tier, thinking_level=thinking_level
+    )
+    if thinking is not None:
+        cfg["thinking_config"] = {_SDK_THINKING_KEYS[k]: v for k, v in thinking.items()}
     return cfg
 
 
-def gemini_config_rest(thinking_budget=0, **kwargs) -> dict:
+def gemini_config_rest(
+    thinking_budget=0,
+    *,
+    model: str | None = None,
+    tier: str | None = None,
+    thinking_level: str | None = None,
+    **kwargs,
+) -> dict:
     """generationConfig para la API REST v1beta (camelCase).
 
-    Mismas semánticas de thinking_budget que gemini_config_sdk().
+    Mismas semánticas de thinking_budget / model / tier / thinking_level que
+    gemini_config_sdk().
     """
     cfg = dict(kwargs)
-    if thinking_budget is not None:
-        cfg["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+    thinking = _gemini_thinking(
+        thinking_budget, model=model, tier=tier, thinking_level=thinking_level
+    )
+    if thinking is not None:
+        cfg["thinkingConfig"] = thinking
     return cfg
 
 
@@ -460,8 +573,43 @@ class _TransportFailure(Exception):
 
 
 def router_enabled() -> bool:
-    """¿Este servicio enruta? Fail-safe: sin la var, va directo al proveedor."""
+    """¿Enruta complete() (LEGADO)? Fail-safe: sin la var, va directo al proveedor.
+
+    complete_for NO usa esta función: ver `router_allowed_for_policy()`.
+    """
     return os.getenv(ROUTER_ENV, "").strip().lower() == "openrouter"
+
+
+ROUTER_OFF_VALUE = "off"
+
+
+def router_allowed_for_policy() -> bool:
+    """¿Puede complete_for usar los pasos `@openrouter`? (ola 1, 2026-10-18)
+
+    En complete_for la política de la clase ya decide cuándo se usa
+    OpenRouter, así que basta con tener `OPENROUTER_API_KEY`: no hace falta
+    `NK_ROUTER=openrouter`. La palanca de rollback sin deploy es
+    `NK_ROUTER=off`, que saca al servicio de OpenRouter (motivo
+    `router-apagado`). complete() legado no cambia: sigue exigiendo
+    `NK_ROUTER=openrouter` (`router_enabled()`).
+    """
+    return os.getenv(ROUTER_ENV, "").strip().lower() != ROUTER_OFF_VALUE
+
+
+# Tiers Gemini cuyo razonamiento se reduce al mínimo por defecto también en
+# OpenRouter (regla L-014, D-F): allí Gemini 3.x no admite apagarlo
+# (`reasoning.enabled=false` → 400, comprobado el 2026-10-18) y `effort=low`
+# dio 0 tokens de razonamiento en 3.5-flash-lite y 3.8-flash. gemini_pro
+# conserva el razonamiento dinámico (calidad), como en el leg directo.
+_ROUTER_DEFAULT_REASONING = {
+    "gemini_flash": {"effort": "low"},
+    "gemini_flash_lite": {"effort": "low"},
+}
+
+
+def _router_default_reasoning(tier: str) -> dict[str, Any] | None:
+    cfg = _ROUTER_DEFAULT_REASONING.get(tier)
+    return dict(cfg) if cfg is not None else None
 
 
 def router_slug(tier: str) -> str:
@@ -575,7 +723,7 @@ def complete(
 
     body: dict[str, Any] = {
         "model": model,
-        "messages": [dict(m) for m in messages],
+        "messages": _openai_messages(messages),
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
@@ -602,6 +750,7 @@ def complete(
         model=model,
         http_status=status,
         usage=usage,
+        finish_reason=_finish_openai_style(payload),
     )
 
 
@@ -658,7 +807,7 @@ def _complete_routed(
         try:
             return _leg_openrouter(
                 slug, leg_or, messages, json_schema, max_tokens, temperature,
-                post, timeout,
+                post, timeout, reasoning=_router_default_reasoning(tier),
             )
         except _TRANSPORT_ERRORS as exc:
             _fallo(leg_or, exc)
@@ -734,8 +883,42 @@ def complete_for(
     job_id: str | None = None,
     run_id: str | None = None,
     reason: str | None = None,
+    tier: str | None = None,
+    stop: list[str] | None = None,
+    json_schema_strict: bool = True,
+    data_collection: str | None = "deny",
+    reasoning: Mapping[str, Any] | None = None,
 ) -> LLMResult:
     """Completa un chat según la política de la CLASE de trabajo.
+
+    Parámetros añadidos el 2026-10-18 (todos opcionales, sin cambiar lo
+    anterior):
+
+    - `tier`: fija el tier (fase «solo transporte» de D-E: cambiar de familia
+      solo con eval). Se recorren las MISMAS vías de la clase, en su orden,
+      pero con ese tier (cada vía una vez y solo si sirve a su familia); si
+      ninguna vía de la clase le sirve (o la clase no tiene cadena API), la
+      cadena legado del tier: `openrouter` → directo de su familia. Si la
+      clase tiene pasos de la familia del tier, manda el orden de vías de
+      esos pasos (D2). Mismo presupuesto, mismo evento (`reason` lleva
+      `;tier:<tier>`). Ver `ai_policy.api_chain_for_tier`.
+    - `stop`: lista de stop sequences, en todos los legs (`stop` en
+      OpenRouter/OpenAI, `stop_sequences` en Anthropic, `stopSequences` en
+      Gemini).
+    - `json_schema_strict`: `strict` del json_schema en los legs estilo
+      OpenAI (OpenRouter, OpenAI); por defecto True, como hasta ahora.
+    - `data_collection`: `provider.data_collection` del paso OpenRouter;
+      "deny" por defecto (solo proveedores que no guardan ni entrenan con los
+      datos). `None` no envía la preferencia.
+    - `reasoning`: objeto `reasoning` de OpenRouter tal cual (`{"effort":
+      "low"}`, `{"enabled": False}`, `{"max_tokens": n}`). Sin él, los tiers
+      gemini flash salen con `{"effort": "low"}` (L-014). En Gemini directo se
+      traduce a thinkingLevel/thinkingBudget; los pasos directos de Anthropic
+      y OpenAI lo ignoran. Ojo: Gemini 3.x en OpenRouter rechaza
+      `{"enabled": False}` (400, encadena).
+    - `messages[i]["content"]` puede ser una lista de partes estilo OpenAI
+      (text, image_url con data: URI o URL, file con PDF en base64): cada leg
+      la traduce a su formato.
 
     La clase (`nickname_common.ai_policy`, fuente canónica) fija la cadena
     ordenada de pasos `{tier, via}`. Antes de tocar red o presupuesto se
@@ -743,9 +926,11 @@ def complete_for(
     o `NK_MODEL_<TIER>_SLUG` que cruza de familia) es config, no transporte, y
     revienta sin encadenar. Después se recorre la cadena en orden:
 
-    - Paso `@openrouter`: solo si `NK_ROUTER=openrouter` (router_enabled()) Y
-      hay `OPENROUTER_API_KEY`. Quitar `NK_ROUTER` sigue siendo la palanca de
-      rollback: el servicio deja de salir por OpenRouter sin deploy.
+    - Paso `@openrouter`: siempre que haya `OPENROUTER_API_KEY`, salvo
+      `NK_ROUTER=off` (`router_allowed_for_policy()`), que es la palanca de
+      rollback sin deploy (motivo `router-apagado`). A diferencia de
+      complete() legado, NO hace falta `NK_ROUTER=openrouter`: la política de
+      la clase ya decide cuándo se usa OpenRouter.
     - Pasos directos (`anthropic_direct`, `openai_direct`, `gemini_direct`):
       solo si existe su clave. `anthropic_direct` exige además la
       autorización D-A (`ai_policy.ANTHROPIC_DIRECT_AUTHORIZED`, por
@@ -798,7 +983,12 @@ def complete_for(
     modelos con razonamiento lo consumen antes del texto visible.
     """
     exempt = _validated_budget_args(guard, budget_exempt)
-    steps = _api_steps_for(clase)
+    stop = _stop_list(stop)
+    if data_collection is not None and data_collection not in ("allow", "deny"):
+        raise ValueError("data_collection debe ser 'deny', 'allow' o None")
+    if reasoning is not None and not isinstance(reasoning, Mapping):
+        raise TypeError("reasoning debe ser un dict con la forma de OpenRouter")
+    steps = _api_steps_for(clase, tier)
     requested = [_step_requested_model(step) for step in steps]
     event_base = {
         "service": (
@@ -809,6 +999,7 @@ def complete_for(
         "job_id": job_id or f"ai_policy:{clase}",
         "run_id": run_id or uuid.uuid4().hex,
         "reason": (reason or f"clase:{clase}")
+        + (f";tier:{tier}" if tier else "")
         + (f";budget_exempt:{exempt}" if exempt else ""),
     }
     # Identidad del DESPLIEGUE para la autorización D-A: la variable de entorno
@@ -829,35 +1020,37 @@ def complete_for(
     fallos_de_red: list[Exception] = []
     puertas_caidas: set[str] = set()
     for step, model in zip(steps, requested):
-        tier, via = step.tier, step.via
+        step_tier, via = step.tier, step.via
         if via == "openrouter":
             label = f"openrouter:{model.split('/', 1)[0]}"
         else:
             label = _DIRECT_VIA_LABELS[via]
         skip = _step_skip_reason(
-            via, tier, model, label,
+            via, step_tier, model, label,
             guard=guard, agent=agent, job_id=event_base["job_id"],
             puertas_caidas=puertas_caidas,
         )
         if skip is not None:
-            intentos.append(f"{label}[{tier}]({skip})")
+            intentos.append(f"{label}[{step_tier}]({skip})")
             continue
         try:
             result = _run_step(
-                via, tier, model, label, messages, json_schema, max_tokens,
+                via, step_tier, model, label, messages, json_schema, max_tokens,
                 temperature, post, timeout,
+                stop=stop, strict=json_schema_strict,
+                data_collection=data_collection, reasoning=reasoning,
             )
         except _TRANSPORT_ERRORS as exc:
             motivo = (
                 exc.reason if isinstance(exc, _TransportFailure) else type(exc).__name__
             )
-            intentos.append(f"{label}[{tier}]({motivo})")
+            intentos.append(f"{label}[{step_tier}]({motivo})")
             fallos_de_red.append(exc)
             if _is_door_failure(exc):
                 puertas_caidas.add(via)
             _LOG.warning(
                 "complete_for clase=%s: paso %s[%s] falló (%s); se intenta el siguiente",
-                clase, label, tier, motivo,
+                clase, label, step_tier, motivo,
             )
             continue
         return _settle_result(
@@ -894,13 +1087,14 @@ def _step_skip_reason(
     if via in puertas_caidas:
         return "puerta-caida"
     if via == "openrouter":
-        if not router_enabled():
+        if not router_allowed_for_policy():
             return "router-apagado"
         if not os.getenv(ROUTER_KEY_ENV, "").strip():
-            _LOG.warning(
-                "%s=openrouter pero falta %s: anomalía de config; complete_for "
-                "salta el paso %s[%s]", ROUTER_ENV, ROUTER_KEY_ENV, label, tier,
-            )
+            if router_enabled():
+                _LOG.warning(
+                    "%s=openrouter pero falta %s: anomalía de config; complete_for "
+                    "salta el paso %s[%s]", ROUTER_ENV, ROUTER_KEY_ENV, label, tier,
+                )
             return "sin-credencial"
         return None
     if via == "anthropic_direct":
@@ -935,28 +1129,35 @@ def _run_step(
     temperature: float | None,
     post: HttpPost,
     timeout: float,
+    *,
+    stop: list[str] | None = None,
+    strict: bool = True,
+    data_collection: str | None = None,
+    reasoning: Mapping[str, Any] | None = None,
 ) -> LLMResult:
     """Ejecuta un paso de la cadena con el leg de su vía."""
     if via == "openrouter":
         return _leg_openrouter(
             model, label, messages, json_schema, max_tokens, temperature,
-            post, timeout, track_upstream_cost=True,
+            post, timeout, track_upstream_cost=True, stop=stop, strict=strict,
+            data_collection=data_collection,
+            reasoning=reasoning if reasoning is not None else _router_default_reasoning(tier),
         )
     if via == "anthropic_direct":
         return _leg_anthropic(
             messages, json_schema, max_tokens, temperature, post, timeout,
-            model=model, provider_label=label, native_schema=True,
+            model=model, provider_label=label, native_schema=True, stop=stop,
         )
     if via == "openai_direct":
         return _leg_openai(
             messages, json_schema, max_tokens, temperature, post, timeout,
             model=model, provider_label=label,
-            token_param="max_completion_tokens",
+            token_param="max_completion_tokens", stop=stop, strict=strict,
         )
     if via == "gemini_direct":
         return _leg_gemini_direct(
             tier, messages, json_schema, max_tokens, temperature, post, timeout,
-            track_reasoning_tokens=True,
+            track_reasoning_tokens=True, stop=stop, reasoning=reasoning,
         )
     raise ValueError(f"Vía desconocida en la política: {via!r}")  # pragma: no cover
 
@@ -999,8 +1200,17 @@ def _validated_budget_args(
     return None
 
 
-def _api_steps_for(clase: str) -> tuple:
-    """Cadena API ejecutable de la clase, o ClassNotApiExecutable."""
+def _api_steps_for(clase: str, tier: str | None = None) -> tuple:
+    """Cadena API ejecutable de la clase (o con el tier fijado), o ClassNotApiExecutable."""
+    if tier is not None:
+        if tier not in _DEFAULTS:
+            raise KeyError(f"Tier de modelo desconocido: {tier!r}")
+        if not capabilities(tier)["text"]:
+            raise ClassNotApiExecutable(
+                f"El tier {tier!r} no es de chat: se llama por su endpoint propio "
+                "con get_model(tier), no por complete_for"
+            )
+        return _ai_policy.api_chain_for_tier(clase, tier)
     steps = _ai_policy.api_chain(clase)
     if not steps:
         raise ClassNotApiExecutable(
@@ -1125,13 +1335,15 @@ def _gemini_direct_key() -> str:
     )
 
 
-def _openai_response_format(json_schema: dict[str, Any]) -> dict[str, Any]:
+def _openai_response_format(
+    json_schema: dict[str, Any], strict: bool = True
+) -> dict[str, Any]:
     return {
         "type": "json_schema",
         "json_schema": {
             "name": "result",
             "schema": json_schema,
-            "strict": True,
+            "strict": strict,
         },
     }
 
@@ -1166,10 +1378,205 @@ def _usd_to_micros(value: Any) -> int:
     return int(round(float(value) * 1_000_000))
 
 
+# --- finish_reason normalizado ------------------------------------------------
+# LLMResult.finish_reason vale siempre uno de FINISH_REASONS, sea cual sea el
+# leg: `stop` (terminó o tocó una stop sequence), `length` (max_tokens o
+# ventana de contexto), `content_filter` (filtro de seguridad, rechazo o
+# bloqueo del prompt) u `other` (herramientas, error, ausente...).
+FINISH_REASONS = ("stop", "length", "content_filter", "other")
+
+_GEMINI_FINISH = {
+    "STOP": "stop",
+    "MAX_TOKENS": "length",
+    "SAFETY": "content_filter",
+    "RECITATION": "content_filter",
+    "BLOCKLIST": "content_filter",
+    "PROHIBITED_CONTENT": "content_filter",
+    "SPII": "content_filter",
+    "IMAGE_SAFETY": "content_filter",
+}
+
+_ANTHROPIC_FINISH = {
+    "end_turn": "stop",
+    "stop_sequence": "stop",
+    "max_tokens": "length",
+    "model_context_window_exceeded": "length",
+    "refusal": "content_filter",
+}
+
+
+def _finish_openai_style(payload: Mapping[str, Any]) -> str:
+    """OpenAI, OpenRouter (ya normaliza) y xAI: choices[0].finish_reason."""
+    choices = payload.get("choices") or [{}]
+    raw = (choices[0] or {}).get("finish_reason") if isinstance(choices[0], dict) else None
+    return raw if raw in ("stop", "length", "content_filter") else "other"
+
+
+def _finish_gemini(payload: Mapping[str, Any]) -> str:
+    candidates = payload.get("candidates") or []
+    if not candidates:
+        feedback = payload.get("promptFeedback") or {}
+        return "content_filter" if feedback.get("blockReason") else "other"
+    return _GEMINI_FINISH.get(str(candidates[0].get("finishReason") or ""), "other")
+
+
+def _finish_anthropic(payload: Mapping[str, Any]) -> str:
+    return _ANTHROPIC_FINISH.get(str(payload.get("stop_reason") or ""), "other")
+
+
+# --- Mensajes multimodales ----------------------------------------------------
+# `content` puede ser un str (como siempre) o una LISTA de partes estilo OpenAI:
+#   {"type": "text", "text": "..."}
+#   {"type": "image_url", "image_url": {"url": "data:image/png;base64,..." | "https://..."}}
+#   {"type": "file", "file": {"filename": "x.pdf", "file_data": "data:application/pdf;base64,..."}}
+# OpenRouter y OpenAI (chat/completions) las reciben tal cual; Anthropic las
+# recibe como bloques image/document; Gemini como inlineData/fileData. Un
+# mensaje de sistema solo admite texto. Una parte desconocida es un error de
+# programación (ValueError), no de transporte: no encadena.
+
+
+def _data_uri(uri: str) -> tuple[str, str] | None:
+    """`data:<mime>;base64,<datos>` → (mime, datos). None si no es data: URI."""
+    if not uri.startswith("data:"):
+        return None
+    header, sep, data = uri[5:].partition(",")
+    if not sep or ";base64" not in header:
+        raise ValueError(
+            "parte multimodal: la data: URI debe ir en base64 (data:<mime>;base64,<datos>)"
+        )
+    return (header.split(";", 1)[0] or "application/octet-stream"), data
+
+
+def _normalized_parts(content: Any) -> list[dict[str, str]]:
+    """content (str o lista de partes estilo OpenAI) → partes neutras."""
+    if not isinstance(content, list):
+        return [{"kind": "text", "text": str(content or "")}]
+    parts: list[dict[str, str]] = []
+    for part in content:
+        if not isinstance(part, Mapping):
+            raise ValueError(f"parte multimodal inválida: {type(part).__name__}")
+        ptype = part.get("type")
+        if ptype == "text":
+            parts.append({"kind": "text", "text": str(part.get("text") or "")})
+        elif ptype == "image_url":
+            ref = part.get("image_url")
+            url = ref.get("url") if isinstance(ref, Mapping) else ref
+            if not isinstance(url, str) or not url:
+                raise ValueError("parte image_url sin url")
+            data = _data_uri(url)
+            if data is not None:
+                parts.append({"kind": "image", "mime": data[0], "data": data[1]})
+            else:
+                parts.append({"kind": "image", "url": url})
+        elif ptype == "file":
+            ref = part.get("file")
+            file_data = ref.get("file_data") if isinstance(ref, Mapping) else None
+            if not isinstance(file_data, str) or not file_data:
+                raise ValueError("parte file sin file_data (PDF en base64)")
+            data = _data_uri(file_data) or ("application/pdf", file_data)
+            parts.append({
+                "kind": "file",
+                "mime": data[0],
+                "data": data[1],
+                "filename": str(ref.get("filename") or "documento.pdf"),
+            })
+        else:
+            raise ValueError(
+                f"tipo de parte multimodal no soportado: {ptype!r} (text, image_url, file)"
+            )
+    return parts
+
+
+def _text_only(content: Any) -> str:
+    """Texto de un mensaje de sistema; las partes no textuales no caben ahí."""
+    parts = _normalized_parts(content)
+    if any(p["kind"] != "text" for p in parts):
+        raise ValueError("un mensaje de sistema solo admite partes de texto")
+    return "".join(p["text"] for p in parts)
+
+
+def _openai_messages(messages: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Mensajes para OpenRouter / OpenAI / xAI: las partes viajan tal cual.
+
+    Solo se valida la lista y se completa un `file_data` en base64 sin
+    prefijo con su data: URI (las dos APIs la exigen).
+    """
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        msg = dict(m)
+        content = msg.get("content")
+        if isinstance(content, list):
+            parts = _normalized_parts(content)
+            rebuilt: list[Any] = []
+            for original, part in zip(content, parts):
+                if part["kind"] == "file":
+                    rebuilt.append({
+                        "type": "file",
+                        "file": {
+                            "filename": part["filename"],
+                            "file_data": f"data:{part['mime']};base64,{part['data']}",
+                        },
+                    })
+                else:
+                    rebuilt.append(dict(original))
+            msg["content"] = rebuilt
+        out.append(msg)
+    return out
+
+
+def _anthropic_content(content: Any) -> Any:
+    """Partes estilo OpenAI → bloques de la API Messages de Anthropic."""
+    if not isinstance(content, list):
+        return content
+    blocks: list[dict[str, Any]] = []
+    for part in _normalized_parts(content):
+        if part["kind"] == "text":
+            blocks.append({"type": "text", "text": part["text"]})
+        elif part["kind"] == "image" and "url" in part:
+            blocks.append({"type": "image", "source": {"type": "url", "url": part["url"]}})
+        elif part["kind"] == "image":
+            blocks.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": part["mime"], "data": part["data"]},
+            })
+        else:
+            if part["mime"] != "application/pdf":
+                raise ValueError(
+                    f"Anthropic solo acepta documentos PDF en base64, no {part['mime']!r}"
+                )
+            blocks.append({
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": part["data"]},
+            })
+    return blocks
+
+
+def _gemini_parts(content: Any) -> list[dict[str, Any]]:
+    """Partes estilo OpenAI → parts de Gemini REST (inlineData / fileData)."""
+    parts: list[dict[str, Any]] = []
+    for part in _normalized_parts(content):
+        if part["kind"] == "text":
+            parts.append({"text": part["text"]})
+        elif "url" in part:
+            mime = mimetypes.guess_type(part["url"])[0] or "image/jpeg"
+            parts.append({"fileData": {"mimeType": mime, "fileUri": part["url"]}})
+        else:
+            parts.append({"inlineData": {"mimeType": part["mime"], "data": part["data"]}})
+    return parts
+
+
+def _stop_list(stop: list[str] | tuple[str, ...] | None) -> list[str] | None:
+    if stop is None:
+        return None
+    if isinstance(stop, str) or not all(isinstance(s, str) and s for s in stop):
+        raise ValueError("stop debe ser una lista de cadenas no vacías")
+    return list(stop) or None
+
+
 def _leg_openrouter(
     slug: str,
     leg: str,
-    messages: list[Mapping[str, str]],
+    messages: list[Mapping[str, Any]],
     json_schema: dict[str, Any] | None,
     max_tokens: int,
     temperature: float | None,
@@ -1177,6 +1584,10 @@ def _leg_openrouter(
     timeout: float,
     *,
     track_upstream_cost: bool = False,
+    stop: list[str] | None = None,
+    strict: bool = True,
+    data_collection: str | None = None,
+    reasoning: Mapping[str, Any] | None = None,
 ) -> LLMResult:
     """Leg OpenRouter. `temperature=None` no la envía (solo complete_for).
 
@@ -1186,11 +1597,16 @@ def _leg_openrouter(
     informa `usage.is_byok`: con BYOK (decisión D-A, el crédito Team de
     Anthropic) `cost` es solo la comisión de OpenRouter y el gasto del modelo
     viaja en upstream. complete() no lo pide, así que su `usage` no cambia.
+
+    `data_collection` → `provider.data_collection` (complete_for manda
+    "deny": solo proveedores que no guardan ni entrenan con los datos).
+    `reasoning` → el objeto `reasoning` de OpenRouter tal cual
+    (`{"effort": "low"}`, `{"enabled": False}`, `{"max_tokens": n}`).
     """
     key = os.getenv(ROUTER_KEY_ENV, "").strip()
     body: dict[str, Any] = {
         "model": slug,
-        "messages": [dict(m) for m in messages],
+        "messages": _openai_messages(messages),
         "max_tokens": max_tokens,
         # Sin esto OpenRouter devuelve tokens pero no coste, y el contador del
         # Command Center se quedaria otra vez sin la cifra que importa.
@@ -1199,7 +1615,13 @@ def _leg_openrouter(
     if temperature is not None:
         body["temperature"] = temperature
     if json_schema is not None:
-        body["response_format"] = _openai_response_format(json_schema)
+        body["response_format"] = _openai_response_format(json_schema, strict)
+    if stop:
+        body["stop"] = list(stop)
+    if data_collection is not None:
+        body["provider"] = {"data_collection": data_collection}
+    if reasoning is not None:
+        body["reasoning"] = dict(reasoning)
 
     status, raw = post(OPENROUTER_CHAT_URL, _router_headers(key), body, timeout)
     if status != 200:
@@ -1225,6 +1647,7 @@ def _leg_openrouter(
         model=slug,
         http_status=status,
         usage=usage,
+        finish_reason=_finish_openai_style(payload),
     )
 
 
@@ -1261,27 +1684,54 @@ def _gemini_schema(schema: Any) -> Any:
 
 
 def _gemini_contents(
-    messages: list[Mapping[str, str]],
+    messages: list[Mapping[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Convierte messages estilo chat a contents de Gemini (assistant→model)."""
     contents: list[dict[str, Any]] = []
     system_parts: list[str] = []
     for m in messages:
         role = str(m.get("role") or "user")
-        text = str(m.get("content") or "")
+        content = m.get("content")
         if role == "system":
-            system_parts.append(text)
+            system_parts.append(_text_only(content))
             continue
         contents.append({
             "role": "model" if role == "assistant" else "user",
-            "parts": [{"text": text}],
+            "parts": _gemini_parts(content),
         })
     return contents, system_parts
 
 
+def _gemini_leg_thinking(
+    tier: str, model: str, reasoning: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """thinkingConfig del leg directo; `reasoning` usa la forma de OpenRouter.
+
+    Sin `reasoning`: razonamiento mínimo del modelo en los tiers flash y
+    dinámico en gemini_pro (calidad), como siempre (GOTCHA L-014).
+    `{"effort": X}` → thinkingLevel X (solo Gemini 3.x; en 2.5 se ignora);
+    `{"max_tokens": n}` → thinkingBudget n; `{"enabled": False}` → mínimo;
+    `{"enabled": True}` → dinámico.
+    """
+    budget: int | None = None if tier == "gemini_pro" else 0
+    level: str | None = None
+    if reasoning:
+        if reasoning.get("effort") is not None and model.startswith("gemini-3"):
+            effort = str(reasoning["effort"])
+            level = "high" if effort == "xhigh" else effort
+            budget = None
+        elif reasoning.get("max_tokens") is not None:
+            budget = int(reasoning["max_tokens"])
+        elif reasoning.get("enabled") is False:
+            budget = 0
+        elif reasoning.get("enabled") is True:
+            budget = None
+    return _gemini_thinking(budget, model=model, tier=None, thinking_level=level)
+
+
 def _leg_gemini_direct(
     tier: str,
-    messages: list[Mapping[str, str]],
+    messages: list[Mapping[str, Any]],
     json_schema: dict[str, Any] | None,
     max_tokens: int,
     temperature: float | None,
@@ -1289,6 +1739,8 @@ def _leg_gemini_direct(
     timeout: float,
     *,
     track_reasoning_tokens: bool = False,
+    stop: list[str] | None = None,
+    reasoning: Mapping[str, Any] | None = None,
 ) -> LLMResult:
     """Leg Gemini REST v1beta del tier. `temperature=None` no la envía.
 
@@ -1300,16 +1752,17 @@ def _leg_gemini_direct(
     model = get_model(tier)
     url = GEMINI_GENERATE_URL.format(model=model) + f"?key={_gemini_direct_key()}"
     contents, system_parts = _gemini_contents(messages)
-    sampling: dict[str, Any] = {}
+    gen_cfg: dict[str, Any] = {"maxOutputTokens": max_tokens}
     if temperature is not None:
-        sampling["temperature"] = temperature
-    # GOTCHA L-014: gemini-2.5-pro RECHAZA thinking_budget=0 (400). Para el
-    # tier gemini_pro va SIEMPRE thinking_budget=None (sin thinkingConfig).
-    gen_cfg = gemini_config_rest(
-        thinking_budget=None if tier == "gemini_pro" else 0,
-        maxOutputTokens=max_tokens,
-        **sampling,
-    )
+        gen_cfg["temperature"] = temperature
+    # GOTCHA L-014 + D-F: el razonamiento mínimo depende del MODELO (los Pro
+    # solo funcionan en modo thinking; 3.5-flash-lite quiere thinkingLevel y
+    # 3.8-flash thinkingBudget). Ver _GEMINI_MIN_THINKING.
+    thinking = _gemini_leg_thinking(tier, model, reasoning)
+    if thinking is not None:
+        gen_cfg["thinkingConfig"] = thinking
+    if stop:
+        gen_cfg["stopSequences"] = list(stop)
     if json_schema is not None:
         gen_cfg["responseMimeType"] = "application/json"
         gen_cfg["responseSchema"] = _gemini_schema(json_schema)
@@ -1326,7 +1779,9 @@ def _leg_gemini_direct(
     candidates = payload.get("candidates") or [{}]
     parts = (candidates[0].get("content") or {}).get("parts") or []
     text = "".join(
-        str(p.get("text") or "") for p in parts if isinstance(p, dict)
+        str(p.get("text") or "")
+        for p in parts
+        if isinstance(p, dict) and not p.get("thought")
     )
     meta = payload.get("usageMetadata") or {}
     usage: dict[str, int] = {}
@@ -1346,11 +1801,12 @@ def _leg_gemini_direct(
         model=model,
         http_status=status,
         usage=usage,
+        finish_reason=_finish_gemini(payload),
     )
 
 
 def _leg_openai(
-    messages: list[Mapping[str, str]],
+    messages: list[Mapping[str, Any]],
     json_schema: dict[str, Any] | None,
     max_tokens: int,
     temperature: float | None,
@@ -1360,6 +1816,8 @@ def _leg_openai(
     model: str | None = None,
     provider_label: str = "openai-fallback",
     token_param: str = "max_tokens",
+    stop: list[str] | None = None,
+    strict: bool = True,
 ) -> LLMResult:
     """Leg OpenAI chat/completions.
 
@@ -1369,6 +1827,9 @@ def _leg_openai(
     y `token_param="max_completion_tokens"`: los modelos de razonamiento
     (gpt-5.x / gpt-6) rechazan `max_tokens` en la API directa. Con
     `temperature=None` no se envía (esos modelos tampoco la aceptan).
+    Partes multimodales: chat/completions acepta `image_url` y `file` tal
+    cual. `stop` va como `stop` (ojo: algunos modelos de razonamiento lo
+    rechazan con 400, que encadena como cualquier fallo de transporte).
     """
     key = os.getenv(OPENAI_KEY_ENV, "").strip()
     if model is None:
@@ -1382,13 +1843,15 @@ def _leg_openai(
     }
     body: dict[str, Any] = {
         "model": model,
-        "messages": [dict(m) for m in messages],
+        "messages": _openai_messages(messages),
         token_param: max_tokens,
     }
     if temperature is not None:
         body["temperature"] = temperature
     if json_schema is not None:
-        body["response_format"] = _openai_response_format(json_schema)
+        body["response_format"] = _openai_response_format(json_schema, strict)
+    if stop:
+        body["stop"] = list(stop)
 
     status, raw = post(OPENAI_CHAT_URL, headers, body, timeout)
     if status != 200:
@@ -1402,11 +1865,12 @@ def _leg_openai(
         model=model,
         http_status=status,
         usage=_token_usage(payload.get("usage") or {}),
+        finish_reason=_finish_openai_style(payload),
     )
 
 
 def _leg_anthropic(
-    messages: list[Mapping[str, str]],
+    messages: list[Mapping[str, Any]],
     json_schema: dict[str, Any] | None,
     max_tokens: int,
     temperature: float | None,
@@ -1416,6 +1880,7 @@ def _leg_anthropic(
     model: str | None = None,
     provider_label: str = "anthropic-fallback",
     native_schema: bool = False,
+    stop: list[str] | None = None,
 ) -> LLMResult:
     """Leg Anthropic Messages.
 
@@ -1426,6 +1891,8 @@ def _leg_anthropic(
     nativos (`output_config.format` json_schema), disponibles en la familia
     5.x. Con `temperature=None` no se envía: Opus 5.5 la rechaza siempre y
     Sonnet/Haiku 5.5 con cualquier valor distinto del default (400).
+    Partes multimodales → bloques `image` (base64 o url) y `document` (PDF);
+    `stop` → `stop_sequences`.
     """
     key = os.getenv(ANTHROPIC_KEY_ENV, "").strip()
     if model is None:
@@ -1439,9 +1906,15 @@ def _leg_anthropic(
         "Content-Type": "application/json",
     }
     system_chunks = [
-        str(m.get("content") or "") for m in messages if m.get("role") == "system"
+        _text_only(m.get("content")) for m in messages if m.get("role") == "system"
     ]
-    chat = [dict(m) for m in messages if m.get("role") != "system"]
+    chat = []
+    for m in messages:
+        if m.get("role") == "system":
+            continue
+        msg = dict(m)
+        msg["content"] = _anthropic_content(msg.get("content"))
+        chat.append(msg)
     if json_schema is not None and not native_schema:
         # LÍMITE DOCUMENTADO del leg legado: schema por instrucción de sistema
         # + parseo del texto (_parse_json_text). Si el modelo no cumple,
@@ -1464,6 +1937,8 @@ def _leg_anthropic(
         body["output_config"] = {
             "format": {"type": "json_schema", "schema": json_schema}
         }
+    if stop:
+        body["stop_sequences"] = list(stop)
     if system_chunks:
         body["system"] = "\n\n".join(system_chunks)
 
@@ -1491,6 +1966,7 @@ def _leg_anthropic(
         model=model,
         http_status=status,
         usage=usage,
+        finish_reason=_finish_anthropic(payload),
     )
 
 

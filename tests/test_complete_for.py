@@ -154,23 +154,23 @@ class TestResolucionPorClase:
         res = llm.complete_for("clasificacion_masiva", _MSG, guard=guard,
                                json_schema=_SCHEMA, http_post=red)
 
-        assert red.modelos() == ["gemini-2.5-flash-lite"]
+        assert red.modelos() == ["gemini-3.5-flash-lite"]
         assert res.provider == "google-direct"
         assert res.parsed_json == {"ok": True}
         assert almacen.sumas == [estimate_cost_micros(
-            "gemini-2.5-flash-lite", input_tokens=700, output_tokens=300)]
+            "gemini-3.5-flash-lite", input_tokens=700, output_tokens=300)]
 
     def test_clasificacion_masiva_respaldo_flash_antes_que_openrouter(self, monkeypatch):
         _todas_las_claves(monkeypatch)
         red = Red(
-            ("generativelanguage.googleapis.com", "gemini-2.5-flash-lite", (503, {})),
-            ("generativelanguage.googleapis.com", "gemini-2.5-flash", (200, _gemini())),
+            ("generativelanguage.googleapis.com", "gemini-3.5-flash-lite", (503, {})),
+            ("generativelanguage.googleapis.com", "gemini-3.8-flash", (200, _gemini())),
         )
 
         res = llm.complete_for("clasificacion_masiva", _MSG, guard=None,
                                budget_exempt=_EXENTO, http_post=red)
 
-        assert red.modelos() == ["gemini-2.5-flash-lite", "gemini-2.5-flash"]
+        assert red.modelos() == ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
         assert res.provider == "google-direct"
 
     def test_clasificacion_masiva_sin_gemini_directo_cae_a_openrouter(self, monkeypatch):
@@ -181,7 +181,7 @@ class TestResolucionPorClase:
         res = llm.complete_for("clasificacion_masiva", _MSG, guard=guard,
                                json_schema=_SCHEMA, http_post=red)
 
-        assert red.modelos() == ["google/gemini-2.5-flash-lite"]
+        assert red.modelos() == ["google/gemini-3.5-flash-lite"]
         assert res.provider == "openrouter:google"
         assert almacen.sumas == [12300]
 
@@ -218,12 +218,12 @@ class TestResolucionPorClase:
         res = llm.complete_for("contexto_largo", _MSG, guard=None,
                                budget_exempt=_EXENTO, http_post=red)
 
-        assert red.modelos() == ["gemini-2.5-pro"]
+        assert red.modelos() == ["gemini-3.1-pro-preview"]
         cfg = red.llamadas[0]["body"]["generationConfig"]
-        assert "thinkingConfig" not in cfg, "gemini-2.5-pro rechaza thinking_budget=0"
+        assert "thinkingConfig" not in cfg, "gemini-3.1-pro-preview rechaza thinking_budget=0"
         assert "temperature" not in cfg
         assert res.provider == "google-direct"
-        assert res.model == "gemini-2.5-pro"
+        assert res.model == "gemini-3.1-pro-preview"
 
     def test_contexto_largo_sigue_por_claude_byok(self, monkeypatch):
         """SPEC §4: Gemini → Claude (BYOK, crédito Team) → OpenRouter."""
@@ -236,20 +236,20 @@ class TestResolucionPorClase:
         res = llm.complete_for("contexto_largo", _MSG, guard=None,
                                budget_exempt=_EXENTO, http_post=red)
 
-        assert red.modelos() == ["gemini-2.5-pro", "anthropic/claude-sonnet-5.5"]
+        assert red.modelos() == ["gemini-3.1-pro-preview", "anthropic/claude-sonnet-5.5"]
         assert res.provider == "openrouter:anthropic"
 
     def test_contexto_largo_acaba_en_gemini_pro_por_openrouter(self, monkeypatch):
         _router(monkeypatch)
         red = Red(
             ("openrouter.ai", "anthropic/claude-sonnet-5.5", (503, {})),
-            ("openrouter.ai", "google/gemini-2.5-pro", (200, _chat_con_coste("ok"))),
+            ("openrouter.ai", "google/gemini-3.1-pro-preview", (200, _chat_con_coste("ok"))),
         )
 
         res = llm.complete_for("contexto_largo", _MSG, guard=None,
                                budget_exempt=_EXENTO, http_post=red)
 
-        assert red.modelos() == ["anthropic/claude-sonnet-5.5", "google/gemini-2.5-pro"]
+        assert red.modelos() == ["anthropic/claude-sonnet-5.5", "google/gemini-3.1-pro-preview"]
         assert res.provider == "openrouter:google"
 
     @pytest.mark.parametrize("clase", ["codigo", "revision", "coordinacion"])
@@ -280,9 +280,22 @@ class TestResolucionPorClase:
 # --- Saltos por credencial y por NK_ROUTER ------------------------------------
 
 class TestSaltos:
-    def test_sin_nk_router_se_saltan_los_pasos_openrouter(self, monkeypatch):
-        """Palanca de rollback: quitar NK_ROUTER saca al servicio de OpenRouter
+    def test_con_clave_y_sin_nk_router_sale_por_openrouter(self, monkeypatch):
+        """2026-10-18: en complete_for basta la clave; la política decide."""
+        monkeypatch.setenv(llm.ROUTER_KEY_ENV, "sk-or-test")
+        red = Red(("openrouter.ai", None, (200, _chat_con_coste())))
+
+        res = llm.complete_for("cliente_dinero_tiempo_real", _MSG, guard=None,
+                               budget_exempt=_EXENTO, http_post=red)
+
+        assert red.modelos() == ["anthropic/claude-sonnet-5.5"]
+        assert res.provider == "openrouter:anthropic"
+
+    @pytest.mark.parametrize("valor", ["off", "OFF", " off "])
+    def test_nk_router_off_salta_los_pasos_openrouter(self, monkeypatch, valor):
+        """Palanca de rollback: NK_ROUTER=off saca al servicio de OpenRouter
         aunque tenga la clave."""
+        monkeypatch.setenv(llm.ROUTER_ENV, valor)
         monkeypatch.setenv(llm.ROUTER_KEY_ENV, "sk-or-test")
         monkeypatch.setenv(llm.OPENAI_KEY_ENV, "oa-test")
         red = Red(("api.openai.com", None, (200, _chat())))
@@ -294,7 +307,8 @@ class TestSaltos:
         assert all("openrouter.ai" not in ll["url"] for ll in red.llamadas)
         assert res.provider == "openai-direct"
 
-    def test_sin_nk_router_gemini_caido_no_sale_por_openrouter(self, monkeypatch):
+    def test_nk_router_off_gemini_caido_no_sale_por_openrouter(self, monkeypatch):
+        monkeypatch.setenv(llm.ROUTER_ENV, "off")
         monkeypatch.setenv(llm.ROUTER_KEY_ENV, "sk-or-test")
         monkeypatch.setenv(llm.GEMINI_KEY_ENV, "g-test")
         red = Red(("generativelanguage.googleapis.com", None, (503, {})))
@@ -478,8 +492,8 @@ class TestSaltos:
         assert almacen.lecturas == 0
 
     @pytest.mark.parametrize("tier, slug", [
-        ("claude_sonnet", "google/gemini-2.5-flash-lite"),
-        ("claude_sonnet", "anthropic/gemini-2.5-flash"),
+        ("claude_sonnet", "google/gemini-3.5-flash-lite"),
+        ("claude_sonnet", "anthropic/gemini-3.8-flash"),
         ("gpt_quality", "x-ai/grok-4.7"),
     ])
     def test_override_de_slug_que_cruza_de_familia_revienta(self, monkeypatch, tier, slug):
@@ -500,9 +514,9 @@ class TestSaltos:
             llm.complete_for("cliente_dinero_tiempo_real", _MSG, guard=None,
                              budget_exempt=_EXENTO, http_post=red)
         mensaje = str(exc.value)
-        assert "openrouter:anthropic[claude_sonnet](router-apagado)" in mensaje
+        assert "openrouter:anthropic[claude_sonnet](sin-credencial)" in mensaje
         assert "anthropic-direct[claude_sonnet](sin-credencial)" in mensaje
-        assert "openrouter:openai[gpt_quality](router-apagado)" in mensaje
+        assert "openrouter:openai[gpt_quality](sin-credencial)" in mensaje
         assert "openai-direct[gpt_quality](sin-credencial)" in mensaje
         assert red.llamadas == []
         assert isinstance(exc.value, llm.ProviderNotConfigured)
@@ -664,7 +678,7 @@ class TestPuertaCaida:
         res = llm.complete_for("clasificacion_masiva", _MSG, guard=None,
                                budget_exempt=_EXENTO, http_post=red)
 
-        assert red.modelos() == ["gemini-2.5-flash-lite", "google/gemini-2.5-flash-lite"]
+        assert red.modelos() == ["gemini-3.5-flash-lite", "google/gemini-3.5-flash-lite"]
         assert res.provider == "openrouter:google"
 
     def test_la_puerta_caida_es_por_llamada(self, monkeypatch):
@@ -754,7 +768,7 @@ class TestPresupuesto:
 
         res = llm.complete_for("clasificacion_masiva", _MSG, guard=guard, http_post=red)
 
-        esperado = estimate_cost_micros("gemini-2.5-flash-lite", input_tokens=700,
+        esperado = estimate_cost_micros("gemini-3.5-flash-lite", input_tokens=700,
                                         output_tokens=300)
         assert esperado is not None and esperado > 0
         assert res.usage_event.cost_source is CostSource.CATALOG
@@ -762,9 +776,12 @@ class TestPresupuesto:
         assert almacen.sumas == [esperado]
 
     def test_paso_directo_sin_precio_verificado_se_salta_con_guard(self, monkeypatch):
-        """Fail-closed: Anthropic/OpenAI directos no informan coste y el
-        catálogo no tiene precio verificado de sus modelos; con guard, el paso
-        se salta en vez de gastar sin que el presupuesto lo vea."""
+        """Fail-closed: Anthropic/OpenAI directos no informan coste; si el
+        catálogo no tiene precio verificado del modelo (aquí, overrides de la
+        misma familia sin precio), con guard el paso se salta en vez de gastar
+        sin que el presupuesto lo vea."""
+        monkeypatch.setenv("NK_MODEL_CLAUDE_SONNET", "claude-sonnet-9")
+        monkeypatch.setenv("NK_MODEL_GPT_QUALITY", "gpt-9")
         monkeypatch.setenv(llm.ANTHROPIC_KEY_ENV, "ak-test")
         monkeypatch.setenv(llm.OPENAI_KEY_ENV, "oa-test")
         _agente_critico(monkeypatch)
@@ -783,6 +800,8 @@ class TestPresupuesto:
     def test_openrouter_402_no_abre_gasto_directo_sin_tope(self, monkeypatch):
         """Tope diario de la clave de OpenRouter agotado (402): la cadena no
         acaba en una vía directa que el guard no pueda contar."""
+        monkeypatch.setenv("NK_MODEL_CLAUDE_SONNET", "claude-sonnet-9")
+        monkeypatch.setenv("NK_MODEL_GPT_QUALITY", "gpt-9")
         _todas_las_claves(monkeypatch)
         _agente_critico(monkeypatch)
         red = Red(("openrouter.ai", None, (402, {})))
@@ -796,7 +815,38 @@ class TestPresupuesto:
         assert "(puerta-caida)" in str(exc.value)
         assert almacen.sumas == []
 
+    def test_openrouter_402_y_directo_con_precio_lo_cuenta_el_guard(self, monkeypatch):
+        """Item 9 (2026-10-18): con precio verificado el respaldo directo de
+        Claude se ejecuta con guard y suma su coste de catálogo, nunca 0."""
+        _todas_las_claves(monkeypatch)
+        _agente_critico(monkeypatch)
+        red = Red(("openrouter.ai", None, (402, {})),
+                  ("api.anthropic.com", None, (200, _anthropic())))
+        guard, almacen = _guard()
+
+        res = llm.complete_for("cliente_dinero_tiempo_real", _MSG, guard=guard, http_post=red)
+
+        esperado = estimate_cost_micros("claude-sonnet-5-5", input_tokens=4, output_tokens=2)
+        assert esperado == 28
+        assert res.provider == "anthropic-direct"
+        assert res.usage_event.cost_source is CostSource.CATALOG
+        assert res.usage_event.cost_micros == esperado
+        assert almacen.sumas == [esperado]
+
+    def test_openai_directo_con_precio_suma_catalogo(self, monkeypatch):
+        monkeypatch.setenv(llm.OPENAI_KEY_ENV, "oa-test")
+        red = Red(("api.openai.com", None, (200, _chat())))
+        guard, almacen = _guard()
+
+        res = llm.complete_for("cliente_dinero_tiempo_real", _MSG, guard=guard, http_post=red)
+
+        assert res.provider == "openai-direct"
+        esperado = estimate_cost_micros("gpt-6-astra", input_tokens=10, output_tokens=5)
+        assert res.usage_event.cost_micros == esperado == 350
+        assert almacen.sumas == [350]
+
     def test_con_exencion_explicita_el_paso_directo_sin_precio_se_ejecuta(self, monkeypatch):
+        monkeypatch.setenv("NK_MODEL_CLAUDE_SONNET", "claude-sonnet-9")
         monkeypatch.setenv(llm.ANTHROPIC_KEY_ENV, "ak-test")
         _agente_critico(monkeypatch)
         red = Red(("api.anthropic.com", None, (200, _anthropic())))
@@ -845,9 +895,9 @@ class TestPresupuesto:
 
         res = llm.complete_for("contexto_largo", _MSG, guard=guard, http_post=red)
 
-        esperado = estimate_cost_micros("gemini-2.5-pro", input_tokens=1000,
+        esperado = estimate_cost_micros("gemini-3.1-pro-preview", input_tokens=1000,
                                         output_tokens=5100)
-        assert esperado == 52_250
+        assert esperado == 63_200  # 1000×2 + 5100×12 USD/M (gemini-3.1-pro-preview)
         assert res.usage_event.cost_micros == esperado
         assert res.usage_event.output_tokens == 5100
         assert almacen.sumas == [esperado]
@@ -864,7 +914,7 @@ class TestPresupuesto:
 
         assert res.usage_event.output_tokens == 1024
         assert almacen.sumas == [estimate_cost_micros(
-            "gemini-2.5-pro", input_tokens=1000, output_tokens=1024)]
+            "gemini-3.1-pro-preview", input_tokens=1000, output_tokens=1024)]
 
     def test_tope_por_llamada_superado_conserva_la_respuesta(self, monkeypatch):
         _router(monkeypatch)
