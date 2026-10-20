@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="nickname-common",
-    version="0.2.0",
+    version="0.2.1",
     description="Paquete compartido para los agentes de Nickname Management",
     author="Nickname Management SL.",
     author_email="diego@nickname.com",
