@@ -66,11 +66,13 @@ from typing import Mapping
 
 from nickname_common import llm
 
-POLICY_VERSION = "2026-10-17.2"
+POLICY_VERSION = "2026-10-20.1"
 
 LANES = ("api", "subscription")
 VIAS = ("openrouter", "anthropic_direct", "openai_direct", "gemini_direct")
-CLIS = ("claude", "codex", "gemini", "grok")
+# `agy` es Antigravity CLI: Google cerró Gemini CLI a las cuentas particulares
+# (AI Pro y Ultra incluidas) el 18/06/2026 y su sustituto oficial es Antigravity.
+CLIS = ("claude", "codex", "agy", "grok")
 
 # Familia de proveedor que admite cada vía directa (llm.provider_of).
 _DIRECT_VIA_PROVIDER = {
@@ -259,8 +261,8 @@ _POLICY: dict[str, ClassPolicy] = {
             clase="contexto_largo",
             lane="subscription",
             description=(
-                "Auditorías documentales, destilado de Obsidian y Drive. Gemini "
-                "CLI (Ultra) primario; por API, Gemini Pro directo, después "
+                "Auditorías documentales, destilado de Obsidian y Drive. "
+                "Antigravity CLI (Gemini Ultra) primario; por API, Gemini Pro directo, después "
                 "Claude (BYOK, crédito Team) y OpenRouter como último recurso "
                 "(SPEC §4)."
             ),
@@ -269,7 +271,7 @@ _POLICY: dict[str, ClassPolicy] = {
                 "claude_sonnet@openrouter",
                 "gemini_pro@openrouter",
             ),
-            subscription_chain=_subs("gemini", "claude"),
+            subscription_chain=_subs("agy", "claude"),
         ),
         ClassPolicy(
             clase="coordinacion",

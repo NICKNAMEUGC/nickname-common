@@ -68,7 +68,7 @@ _CADENAS_SUSCRIPCION = {
     "cliente_dinero_asincrono": ["claude", "codex"],
     "codigo": ["claude", "codex", "grok"],
     "revision": ["codex", "claude", "grok"],
-    "contexto_largo": ["gemini", "claude"],
+    "contexto_largo": ["agy", "claude"],
     "coordinacion": ["grok"],
     "embeddings": [],
     "imagen": [],
