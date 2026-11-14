@@ -746,7 +746,7 @@ def complete(
     status, raw = http_post(XAI_CHAT_URL, headers, body, timeout)
     if status != 200:
         raise ProviderNotConfigured(
-            f"xAI chat/completions HTTP {status}: {raw[:200]}"
+            f"xAI chat/completions HTTP {status}"
         )
     payload = json.loads(raw)
     text = _openai_style_text(payload)
