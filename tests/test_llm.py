@@ -117,9 +117,14 @@ def test_complete_rejects_gemini_tiers():
         llm.complete("gemini_flash", [{"role": "user", "content": "hi"}])
 
 
-def test_complete_xai_without_key_fail_closed(monkeypatch):
+@pytest.mark.parametrize("live", [None, "0", "1"])
+def test_complete_xai_without_key_fail_closed(monkeypatch, live):
     monkeypatch.delenv("XAI_API_KEY", raising=False)
-    monkeypatch.delenv("NK_XAI_LIVE", raising=False)
+    if live is None:
+        monkeypatch.delenv("NK_XAI_LIVE", raising=False)
+    else:
+        monkeypatch.setenv("NK_XAI_LIVE", live)
+    monkeypatch.setattr(llm, "_urllib_post", lambda *args: pytest.fail("red no autorizada"))
     with pytest.raises(ProviderNotConfigured, match="XAI_API_KEY"):
         llm.complete("grok_fast", [{"role": "user", "content": "ping"}])
 
@@ -127,8 +132,27 @@ def test_complete_xai_without_key_fail_closed(monkeypatch):
 def test_complete_xai_with_key_but_live_gated(monkeypatch):
     monkeypatch.setenv("XAI_API_KEY", "xai-test-not-live")
     monkeypatch.delenv("NK_XAI_LIVE", raising=False)
+    monkeypatch.setattr(llm, "_urllib_post", lambda *args: pytest.fail("red no autorizada"))
     with pytest.raises(ProviderNotConfigured, match="NK_XAI_LIVE"):
         llm.complete("grok_fast", [{"role": "user", "content": "ping"}])
+
+
+@pytest.mark.parametrize("status", [400, 401, 429, 503])
+def test_complete_xai_http_error_does_not_expose_response(monkeypatch, status):
+    monkeypatch.delenv("NK_ROUTER", raising=False)
+    private_response = json.dumps({"error": "contenido privado de la peticion"})
+
+    def fake_post(url, headers, body, timeout):
+        return status, private_response
+
+    with pytest.raises(ProviderNotConfigured) as exc:
+        llm.complete(
+            "grok_fast",
+            [{"role": "user", "content": "ping"}],
+            http_post=fake_post,
+        )
+
+    assert str(exc.value) == f"xAI chat/completions HTTP {status}"
 
 
 def test_complete_xai_injected_transport_never_hits_network(monkeypatch):
