@@ -1170,6 +1170,7 @@ def _run_step(
         return _leg_anthropic(
             messages, json_schema, max_tokens, temperature, post, timeout,
             model=model, provider_label=label, native_schema=True, stop=stop,
+            effort=(reasoning or {}).get("effort"),
         )
     if via == "openai_direct":
         return _leg_openai(
@@ -1944,6 +1945,7 @@ def _leg_anthropic(
     provider_label: str = "anthropic-fallback",
     native_schema: bool = False,
     stop: list[str] | None = None,
+    effort: str | None = None,
 ) -> LLMResult:
     """Leg Anthropic Messages.
 
@@ -2000,6 +2002,10 @@ def _leg_anthropic(
         body["output_config"] = {
             "format": {"type": "json_schema", "schema": json_schema}
         }
+    if effort:
+        # `reasoning={"effort": ...}` de complete_for → `output_config.effort` de la API
+        # Messages (familia 5.x): sin él, el paso directo ignoraba el esfuerzo pedido.
+        body.setdefault("output_config", {})["effort"] = effort
     if stop:
         body["stop_sequences"] = list(stop)
     if system_chunks:

@@ -66,7 +66,7 @@ from typing import Mapping
 
 from nickname_common import llm
 
-POLICY_VERSION = "2026-10-20.1"
+POLICY_VERSION = "2026-11-14.1"
 
 LANES = ("api", "subscription")
 VIAS = ("openrouter", "anthropic_direct", "openai_direct", "gemini_direct")
@@ -107,10 +107,30 @@ BROKER_RULES = {
 # empiecen por alguno de esos prefijos (en odoo-agent, únicamente los jobs
 # CFO, que se identifican con un job_id `cfo...`). Sin entrada aquí, el paso
 # se salta aunque el servicio tenga ANTHROPIC_API_KEY.
+_JOBS_DEPARTAMENTO = ("resumen_parte", "agente_responsable")
+
 ANTHROPIC_DIRECT_AUTHORIZED: Mapping[str, tuple[str, ...] | None] = MappingProxyType({
     "nickname-recobro-agent": None,
     "nickname-facturas-agent": None,
     "nickname-odoo-agent": ("cfo",),
+    # Decisión de Diego del 14/11/2026: el agente responsable y el resumen del parte de los doce
+    # departamentos virtuales van por Opus 5.5 con la clave directa del plan Team (clase
+    # `agente_departamento`). Solo esos dos jobs: el crítico y el resto siguen sin vía directa.
+    # Nombres = `NK_AGENT_NAME` del servicio de cada departamento (registry.yaml de apps-config).
+    **{servicio: _JOBS_DEPARTAMENTO for servicio in (
+        "nickname-commercial-dept",        # 01 comercial
+        "nickname-support-dept",           # 02 atención
+        "nickname-people-dept",            # 03 personas
+        "nickname-legal-dept",             # 04 legal
+        "nickname-finance-dept",           # 05 finanzas
+        "nickname-financing-dept",         # 06 financiación
+        "nickname-bi-dept",                # 07 BI
+        "nickname-marketing-dept",         # 08 marketing
+        "nickname-eval-harness",           # 09 assurance (su servicio es el eval harness)
+        "nickname-onne-ecommerce-dept",    # 10 e-commerce ÔNNE
+        "nickname-onne-sales-cx-dept",     # 11 ventas y CX ÔNNE
+        "nickname-onne-logistics-dept",    # 12 logística ÔNNE
+    )},
 })
 
 
@@ -296,6 +316,18 @@ _POLICY: dict[str, ClassPolicy] = {
                 "chat: complete_for la rechaza."
             ),
             api_chain=_api("imagen@gemini_direct"),
+        ),
+        ClassPolicy(
+            clase="agente_departamento",
+            lane="api",
+            description=(
+                "Agente responsable y resumen del parte diario de los doce departamentos "
+                "virtuales (decisión de Diego del 14/11/2026): Opus 5.5 por la clave Anthropic "
+                "directa del plan Team, esfuerzo pedido por el departamento, sin ningún otro paso. "
+                "Un 529 o un 5xx no cae a otro proveedor ni modelo: falla y el departamento lo "
+                "anota sin ejecutar nada."
+            ),
+            api_chain=_api("claude_opus@anthropic_direct"),
         ),
     )
 }

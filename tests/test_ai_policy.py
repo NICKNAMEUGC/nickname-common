@@ -32,6 +32,7 @@ _CLASES = (
     "coordinacion",
     "embeddings",
     "imagen",
+    "agente_departamento",
 )
 
 _CLIENTE_DINERO = [
@@ -60,6 +61,7 @@ _CADENAS_API = {
     "coordinacion": [],
     "embeddings": [("gemini_embedding", "gemini_direct")],
     "imagen": [("imagen", "gemini_direct")],
+    "agente_departamento": [("claude_opus", "anthropic_direct")],
 }
 
 _CADENAS_SUSCRIPCION = {
@@ -72,6 +74,7 @@ _CADENAS_SUSCRIPCION = {
     "coordinacion": ["grok"],
     "embeddings": [],
     "imagen": [],
+    "agente_departamento": [],
 }
 
 _CARRILES = {
@@ -84,6 +87,7 @@ _CARRILES = {
     "coordinacion": "subscription",
     "embeddings": "api",
     "imagen": "api",
+    "agente_departamento": "api",
 }
 
 
@@ -140,7 +144,11 @@ def test_openrouter_sin_byok_es_el_ultimo_recurso():
 
 
 def test_claude_sale_por_byok_antes_que_por_clave_directa():
+    """Excepción: ``agente_departamento`` es Opus directo sin ningún otro paso por decisión de
+    Diego del 14/11/2026 (nunca caer a otro modelo ni a otra vía)."""
     for clase in ai_policy.all_classes():
+        if clase == "agente_departamento":
+            continue
         pasos = [(p.tier, p.via) for p in ai_policy.api_chain(clase)]
         for tier, via in pasos:
             if via == "anthropic_direct":
@@ -183,6 +191,14 @@ def test_codigo_declara_openrouter_como_ultimo_recurso_del_broker():
         ("nickname-odoo-agent", None, False),
         ("nickname-email-marketing-agent", "cfo_x", False),
         ("nickname-fiscal-agent", None, False),
+        ("nickname-finance-dept", "resumen_parte", True),
+        ("nickname-finance-dept", "agente_responsable", True),
+        ("nickname-finance-dept", "critico", False),
+        ("nickname-finance-dept", None, False),
+        ("nickname-onne-sales-cx-dept", "resumen_parte", True),
+        ("nickname-onne-logistics-dept", "agente_responsable", True),
+        ("nickname-commercial-dept", "critico", False),
+        ("nickname-commercial-dept", "propuestas", False),
         ("", None, False),
         (None, None, False),
     ],
@@ -309,3 +325,32 @@ def _pol(**kw):
 def test_validate_rechaza_politicas_incoherentes(politica, motivo):
     with pytest.raises(PolicyError, match=motivo):
         ai_policy.validate(politica)
+
+
+def test_agente_departamento_solo_opus_directo():
+    """Encargo del 14/11: una sola vía, Opus 5.5 directo; ningún otro paso al que caer."""
+    assert ai_policy.api_chain("agente_departamento") == (ApiStep("claude_opus", "anthropic_direct"),)
+    assert llm.get_model("claude_opus").startswith("claude-opus")
+
+
+_DEPARTAMENTOS = (
+    "nickname-commercial-dept", "nickname-support-dept", "nickname-people-dept",
+    "nickname-legal-dept", "nickname-finance-dept", "nickname-financing-dept", "nickname-bi-dept",
+    "nickname-marketing-dept", "nickname-eval-harness", "nickname-onne-ecommerce-dept",
+    "nickname-onne-sales-cx-dept", "nickname-onne-logistics-dept",
+)
+
+
+def test_los_doce_departamentos_solo_con_sus_dos_jobs():
+    """Decisión del 14/11: vía directa para los doce departamentos, solo resumen_parte y
+    agente_responsable; los autorizados de antes no cambian."""
+    for servicio in _DEPARTAMENTOS:
+        assert ai_policy.ANTHROPIC_DIRECT_AUTHORIZED[servicio] == ("resumen_parte", "agente_responsable")
+        for job in ("critico", "clasificar", "propuesta", "", None):
+            assert ai_policy.anthropic_direct_allowed(servicio, job) is False, (servicio, job)
+    assert len([s for s, v in ai_policy.ANTHROPIC_DIRECT_AUTHORIZED.items()
+                if v == ("resumen_parte", "agente_responsable")]) == 12
+    assert ai_policy.ANTHROPIC_DIRECT_AUTHORIZED["nickname-recobro-agent"] is None
+    assert ai_policy.ANTHROPIC_DIRECT_AUTHORIZED["nickname-odoo-agent"] == ("cfo",)
+    # el crítico (cliente_dinero_tiempo_real) no recorre la vía directa en un departamento
+    assert not ai_policy.anthropic_direct_allowed("nickname-finance-dept", "critico")
