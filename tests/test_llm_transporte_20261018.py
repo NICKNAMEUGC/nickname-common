@@ -645,3 +645,64 @@ class TestCosteByokEnCompleteLegado:
         res = llm.complete_for("cliente_dinero_tiempo_real", _MSG, guard=None,
                                budget_exempt=_EXENTO, http_post=red, tier="gemini_pro")
         assert res.usage_event.cost_micros == 244
+
+
+# --- Agente de departamento: Opus directo, esfuerzo y sin caída (14/11/2026) ------
+
+class TestAgenteDepartamento:
+    def test_opus_directo_con_esfuerzo(self, monkeypatch):
+        monkeypatch.setenv(llm.ANTHROPIC_KEY_ENV, "ak-test")
+        monkeypatch.setenv(llm.ROUTER_KEY_ENV, "sk-or-test")
+        monkeypatch.setenv(llm.ROUTER_AGENT_ENV, "nickname-finance-dept")
+        red = Red(**{"api.anthropic.com": (200, _anthropic())})
+        res = llm.complete_for("agente_departamento", _MSG, guard=None, budget_exempt=_EXENTO,
+                               http_post=red, job_id="agente_responsable",
+                               reasoning={"effort": "medium"})
+        assert res.provider == "anthropic-direct" and res.model.startswith("claude-opus")
+        assert red.body["output_config"]["effort"] == "medium"
+        assert all("openrouter" not in c["url"] for c in red.llamadas)
+
+    def test_sin_autorizacion_no_cae_a_openrouter(self, monkeypatch):
+        monkeypatch.setenv(llm.ANTHROPIC_KEY_ENV, "ak-test")
+        monkeypatch.setenv(llm.ROUTER_KEY_ENV, "sk-or-test")
+        monkeypatch.setenv(llm.ROUTER_AGENT_ENV, "nickname-finance-dept")
+        red = Red()
+        with pytest.raises(llm.CascadeExhausted, match="no-autorizado-D-A"):
+            llm.complete_for("agente_departamento", _MSG, guard=None, budget_exempt=_EXENTO,
+                             http_post=red, job_id="critico")
+        assert red.llamadas == []
+
+    def test_fallo_de_anthropic_no_cae_a_otro_modelo(self, monkeypatch):
+        monkeypatch.setenv(llm.ANTHROPIC_KEY_ENV, "ak-test")
+        monkeypatch.setenv(llm.ROUTER_KEY_ENV, "sk-or-test")
+        monkeypatch.setenv(llm.ROUTER_AGENT_ENV, "nickname-finance-dept")
+        red = Red(**{"api.anthropic.com": (529, {})})
+        with pytest.raises(llm.CascadeExhausted):
+            llm.complete_for("agente_departamento", _MSG, guard=None, budget_exempt=_EXENTO,
+                             http_post=red, job_id="resumen_parte")
+        assert [c["url"] for c in red.llamadas] == [llm.ANTHROPIC_MESSAGES_URL]
+
+
+    @pytest.mark.parametrize("status", [529, 500, 502, 503, 429, 401])
+    def test_ningun_fallo_de_anthropic_cae_a_otro_paso(self, monkeypatch, status):
+        """Mutación de la cadena: con cualquier otro paso en la clase, este test cae."""
+        for env in (llm.ANTHROPIC_KEY_ENV, llm.ROUTER_KEY_ENV, llm.OPENAI_KEY_ENV):
+            monkeypatch.setenv(env, "k-test")
+        monkeypatch.setenv(llm.ROUTER_AGENT_ENV, "nickname-onne-sales-cx-dept")
+        red = Red(**{"api.anthropic.com": (status, {})})
+        with pytest.raises(llm.CascadeExhausted) as exc:
+            llm.complete_for("agente_departamento", _MSG, guard=None, budget_exempt=_EXENTO,
+                             http_post=red, job_id="agente_responsable", reasoning={"effort": "medium"})
+        assert [c["url"] for c in red.llamadas] == [llm.ANTHROPIC_MESSAGES_URL]
+        assert exc.value.usage_event.provider == "none"
+
+    def test_critico_de_un_departamento_no_usa_la_via_directa(self, monkeypatch):
+        monkeypatch.setenv(llm.ANTHROPIC_KEY_ENV, "ak-test")
+        monkeypatch.delenv(llm.ROUTER_KEY_ENV, raising=False)
+        monkeypatch.delenv(llm.OPENAI_KEY_ENV, raising=False)
+        monkeypatch.setenv(llm.ROUTER_AGENT_ENV, "nickname-finance-dept")
+        red = Red()
+        with pytest.raises(llm.CascadeExhausted, match="no-autorizado-D-A"):
+            llm.complete_for("cliente_dinero_tiempo_real", _MSG, guard=None, budget_exempt=_EXENTO,
+                             http_post=red, job_id="critico")
+        assert red.llamadas == []
